@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diffusers Image Server</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="app-header">
+  <h1>Diffusers Image Server(Edit系・port 8620)</h1>
+</header>
+
+<div id="status-bar" class="status-bar">
+  <span id="status-text">ステータス取得中...</span>
+  <button id="status-refresh-btn" class="tiny-btn">更新</button>
+  <span class="status-spacer"></span>
+  <label class="unload-label">解放:</label>
+  <button id="unload-t2i-btn" class="tiny-btn secondary">T2I/I2I</button>
+  <button id="unload-edit-btn" class="tiny-btn secondary">Edit</button>
+  <button id="unload-controlnet-btn" class="tiny-btn secondary">ControlNet</button>
+  <button id="unload-joyai-btn" class="tiny-btn secondary">JoyAI</button>
+  <button id="unload-all-btn" class="tiny-btn secondary">全て</button>
+</div>
+
+<main class="container">
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="edit">画像生成/編集(Edit統合)</button>
+    <button class="tab-btn" data-tab="inpaint">Inpaint</button>
+    <button class="tab-btn" data-tab="outpaint">アウトペイント</button>
+    <button class="tab-btn" data-tab="charsheet">キャラシート</button>
+  </nav>
+
+  <section class="panel tab-panel active" id="tab-edit">
+    <h2>画像生成/編集: Edit-2511(指示編集 / テキストのみ生成 / strength I2I)・JoyAI・2512 T2I/I2I</h2>
+    <div class="gen-layout">
+      <div class="gen-col-left">
+        <form id="edit-form" class="gen-form">
+          <label>モデル
+            <select name="model" id="edit-model-select">
+              <option value="qwen-edit-2511">Qwen-Image-Edit-2511(既定)</option>
+              <option value="qwen-edit-2511-gguf">Qwen-Image-Edit-2511(GGUF Q4_K_M・軽量、24GB級以下向け)</option>
+              <option value="joyai-edit-plus">JoyAI-Edit-Plus(マルチ参照合成)</option>
+              <option value="joyai-edit-plus-gguf">JoyAI-Edit-Plus(GGUF Q4_K_M・軽量、24GB級以下向け)</option>
+              <option value="qwen-2512">Qwen-Image-2512(T2I/I2I)</option>
+              <option value="qwen-2512-gguf">Qwen-Image-2512(T2I/I2I・GGUF Q4_K_M・軽量)</option>
+            </select>
+          </label>
+          <p class="form-hint">モデル切替時は別モデルの解放 → 再ロードが走るため、数十秒かかることがあります。GGUF版は量子化が軽量なぶん画質はやや劣りますが24GB/20GB級カードでも動作します。</p>
+          <label>参照画像(任意・最大3枚。複数選択可)
+            <input type="file" name="images" accept="image/*" multiple>
+          </label>
+          <p class="form-hint qwen-edit-only-fields">
+            画像を選択しない場合はテキストのみから新規生成します(T2I相当。JoyAI-Edit-Plusは画像必須)。
+          </p>
+          <p class="form-hint qwen-2512-only-fields hidden">
+            Qwen-Image-2512は指示編集(参照画像を渡して部分修正)には対応していません。
+            画像0枚ならT2I(新規生成)、画像1枚+変化の強さ(strength)指定ならI2Iとして送信します。
+            画像を渡して strength を空欄のままにすることはできません。
+          </p>
+          <label>プロンプト
+            <textarea name="prompt" rows="3" required placeholder="編集内容を指示してください"></textarea>
+          </label>
+          <div class="llm-btn-row">
+            <button type="button" class="tiny-btn secondary llm-enhance-btn">LLM強化</button>
+            <button type="button" class="tiny-btn secondary llm-translate-btn">英訳</button>
+            <button type="button" class="tiny-btn secondary llm-undo-btn hidden">元に戻す</button>
+          </div>
+          <label>ネガティブプロンプト
+            <textarea name="negative_prompt" rows="2">lowres, bad anatomy, bad hands, missing fingers, extra digits, fewer fingers, cropped, worst quality, low quality, jpeg artifacts, signature, watermark, username, blurry</textarea>
+          </label>
+          <p class="form-hint qwen-edit-only-fields">Lightning使用時(cfg=1.0)はネガティブプロンプトは効きません。</p>
+          <div class="form-grid qwen-edit-only-fields">
+            <label>steps <input type="number" name="steps" value="4" min="1" max="50"></label>
+            <label>cfg(true_cfg_scale) <input type="number" name="cfg" value="1.0" step="0.1" min="0" max="20"></label>
+            <label>seed(-1でランダム) <input type="number" name="seed" value="-1" step="1"></label>
+            <label>shift(空欄で既定値) <input type="number" name="shift" step="0.1" placeholder="auto"></label>
+            <label>幅(空欄で自動推定) <input type="number" name="width" step="16" placeholder="auto"></label>
+            <label>高さ(空欄で自動推定) <input type="number" name="height" step="16" placeholder="auto"></label>
+            <label>変化の強さ(strength、空=通常Edit)
+              <input type="number" name="strength" step="0.05" min="0.05" max="1" placeholder="empty=通常Edit">
+            </label>
+          </div>
+          <p class="panel-note qwen-edit-only-fields">
+            48GB専有では標準解像度(自動推定、1024²相当)でOOMする場合があります。逼迫時は
+            幅・高さに 640 を明示してください(実測: 39GB程度に収まることを確認済み)。
+            strength(0〜1)を指定すると Edit-2511 の I2I モード(参照画像1枚必須)になります。
+            空欄のままなら従来どおりの通常Editです。
+          </p>
+          <label class="checkbox-row qwen-edit-only-fields">
+            <input type="checkbox" name="lightning" checked>
+            Lightning 4steps LoRA を使う(既定ON。charsheet と同じ steps=4, true_cfg_scale=1.0, shift=3.0)
+          </label>
+          <div class="form-grid joyai-only-fields hidden">
+            <label>steps <input type="number" name="joyai_steps" value="30" min="1" max="100"></label>
+            <label>guidance_scale <input type="number" name="joyai_guidance_scale" value="4.0" step="0.1" min="0" max="20"></label>
+            <label>seed(-1でランダム) <input type="number" name="joyai_seed" value="-1" step="1"></label>
+            <label>幅(空欄で自動推定) <input type="number" name="joyai_width" step="16" placeholder="auto"></label>
+            <label>高さ(空欄で自動推定) <input type="number" name="joyai_height" step="16" placeholder="auto"></label>
+          </div>
+          <p class="form-hint joyai-only-fields hidden">
+            JoyAI-Edit-Plusは複数参照画像(最大3枚)を同時に渡し、プロンプトで指示した編集・合成が
+            できます(例: 人物とアイテムの2枚を渡し「人物にアイテムを持たせる」)。既定は
+            steps=30・guidance_scale=4.0。幅・高さ未指定時は最後の参照画像のサイズから自動推定されます。
+          </p>
+          <div class="form-grid qwen-2512-only-fields hidden">
+            <label>steps <input type="number" name="qwen2512_steps" value="30" min="1" max="100"></label>
+            <label>cfg(true_cfg_scale) <input type="number" name="qwen2512_cfg" value="4.0" step="0.1" min="0" max="20"></label>
+            <label>seed(-1でランダム) <input type="number" name="qwen2512_seed" value="-1" step="1"></label>
+            <label>幅 <input type="number" name="qwen2512_width" value="1024" step="16" min="256" max="2048"></label>
+            <label>高さ <input type="number" name="qwen2512_height" value="1024" step="16" min="256" max="2048"></label>
+            <label>変化の強さ(strength、画像1枚時のI2Iで使用)
+              <input type="number" name="qwen2512_strength" value="0.6" step="0.05" min="0.05" max="1">
+            </label>
+          </div>
+          <label class="checkbox-row qwen-2512-only-fields hidden">
+            <input type="checkbox" name="qwen2512_lightning" checked>
+            Lightning LoRA を使う(4steps・cfg=1.0・shift=3.0に自動調整)
+          </label>
+          <button type="submit" class="primary-btn">Edit生成</button>
+        </form>
+        <p class="form-error hidden" id="edit-error"></p>
+      </div>
+      <div class="gen-col-right">
+        <div class="result-panel" id="edit-result-panel">
+          <p class="result-placeholder">生成結果はここに表示されます</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel tab-panel" id="tab-inpaint">
+    <h2>Inpaint: マスク領域のみ再生成</h2>
+    <p class="panel-note">
+      無印 Qwen-Image + InstantX/Qwen-Image-ControlNet-Inpainting。白 = 再生成する領域。
+      下のキャンバスにブラシでマスクを描くか、マスク画像を直接アップロードしてください。
+    </p>
+    <div class="gen-layout">
+      <div class="gen-col-left">
+        <form id="inpaint-form" class="gen-form">
+          <label>元画像
+            <input type="file" name="image" id="inpaint-image-input" accept="image/*" required>
+          </label>
+
+          <div id="inpaint-mask-editor" class="mask-editor hidden">
+            <div class="mask-canvas-wrap">
+              <canvas id="inpaint-base-canvas"></canvas>
+              <canvas id="inpaint-mask-canvas"></canvas>
+            </div>
+            <div class="mask-tools">
+              <label class="mask-tool-label">ブラシサイズ
+                <input type="range" id="mask-brush-size" min="4" max="120" value="30">
+              </label>
+              <button type="button" id="mask-mode-brush" class="tiny-btn active-tool">ブラシ(白=編集領域)</button>
+              <button type="button" id="mask-mode-eraser" class="tiny-btn secondary">消しゴム</button>
+              <button type="button" id="mask-clear-btn" class="tiny-btn secondary">クリア</button>
+            </div>
+          </div>
+
+          <label>マスク画像を直接アップロード(任意。指定時はキャンバス描画より優先)
+            <input type="file" name="mask_image_upload" id="inpaint-mask-upload" accept="image/*">
+          </label>
+
+          <label>プロンプト
+            <textarea name="prompt" rows="3" required placeholder="編集内容を指示してください(例: 服の色を変える)"></textarea>
+          </label>
+          <div class="llm-btn-row">
+            <button type="button" class="tiny-btn secondary llm-enhance-btn">LLM強化</button>
+            <button type="button" class="tiny-btn secondary llm-translate-btn">英訳</button>
+            <button type="button" class="tiny-btn secondary llm-undo-btn hidden">元に戻す</button>
+          </div>
+          <label class="qwen-inpaint-only-fields">ネガティブプロンプト
+            <textarea name="negative_prompt" rows="2">lowres, bad anatomy, bad hands, missing fingers, extra digits, fewer fingers, cropped, worst quality, low quality, jpeg artifacts, signature, watermark, username, blurry</textarea>
+          </label>
+          <p class="form-hint qwen-inpaint-only-fields">Lightning使用時(cfg=1.0)はネガティブプロンプトは効きません。</p>
+          <div class="form-grid qwen-inpaint-only-fields">
+            <label>conditioning_scale
+              <input type="number" name="controlnet_conditioning_scale" value="1.0" step="0.05" min="0" max="2">
+            </label>
+            <label>steps <input type="number" name="steps" value="30" min="1" max="100"></label>
+            <label>cfg(true_cfg_scale) <input type="number" name="cfg" value="4.0" step="0.1" min="0" max="20"></label>
+            <label>seed(-1でランダム) <input type="number" name="seed" value="-1" step="1"></label>
+          </div>
+          <button type="submit" class="primary-btn">Inpaint生成</button>
+        </form>
+        <p class="form-error hidden" id="inpaint-error"></p>
+      </div>
+      <div class="gen-col-right">
+        <div class="result-panel" id="inpaint-result-panel">
+          <p class="result-placeholder">生成結果はここに表示されます</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel tab-panel" id="tab-outpaint">
+    <h2>アウトペイント: 画角拡張(元画像の外側をAIで描き足す)</h2>
+    <p class="panel-note">
+      入力画像をアスペクト維持で中央配置し、余白帯を ControlNet Inpainting で生成して指定サイズへ
+      拡張します。フェザー帯より内側は元画像のピクセルがそのまま保持されます。
+      実行前に全モデルを一旦解放するため、1回あたり数十秒のロードコストがかかります。
+    </p>
+    <div class="gen-layout">
+      <div class="gen-col-left">
+        <form id="outpaint-form" class="gen-form">
+          <label>元画像
+            <input type="file" name="image" accept="image/*" required>
+          </label>
+          <img id="outpaint-preview" class="preview-image hidden" alt="プレビュー" style="max-width:100%;">
+          <label>プロンプト(空でも可。シーン記述で拡張部分の内容を誘導できます)
+            <textarea name="prompt" rows="3" placeholder="例: a cozy study room with bookshelves"></textarea>
+          </label>
+          <div class="llm-btn-row">
+            <button type="button" class="tiny-btn secondary llm-enhance-btn">LLM強化</button>
+            <button type="button" class="tiny-btn secondary llm-translate-btn">英訳</button>
+            <button type="button" class="tiny-btn secondary llm-undo-btn hidden">元に戻す</button>
+          </div>
+          <div class="form-grid">
+            <label>出力幅 <input type="number" name="width" value="1280" step="16" min="256" max="2048"></label>
+            <label>出力高さ <input type="number" name="height" value="720" step="16" min="256" max="2048"></label>
+            <label>フェザー(px) <input type="number" name="feather" value="64" step="8" min="0" max="256"></label>
+            <label>steps <input type="number" name="steps" value="30" min="1" max="100"></label>
+            <label>cfg <input type="number" name="cfg" value="4.0" step="0.1" min="0" max="20"></label>
+            <label>seed(-1でランダム) <input type="number" name="seed" value="-1" step="1"></label>
+          </div>
+          <button type="submit" class="primary-btn">アウトペイント生成</button>
+        </form>
+        <p class="form-error hidden" id="outpaint-error"></p>
+      </div>
+      <div class="gen-col-right">
+        <div class="result-panel" id="outpaint-result-panel">
+          <p class="result-placeholder">生成結果はここに表示されます</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel tab-panel" id="tab-charsheet">
+    <h2>キャラシート: 1枚のキャラクター画像から8方向ビューを生成</h2>
+    <p class="panel-note">
+      Qwen-Image-Edit-2511(Edit グループ)+ fal 2511 Multiple-Angles LoRA アダプタで
+      8方向を生成します(通常 Edit とモデルを共有するため切替時の再ロードはありません)。
+    </p>
+
+    <div class="gen-layout">
+      <div class="gen-col-left">
+        <div id="cs-upload-panel">
+          <h3>1. 画像アップロード</h3>
+          <div id="cs-dropzone" class="dropzone">
+            <p id="cs-dropzone-text">ここに画像をドラッグ&ドロップ<br>または クリックして選択</p>
+            <img id="cs-preview-image" class="preview-image hidden" alt="プレビュー">
+            <input type="file" id="cs-file-input" accept="image/*" class="hidden" data-gd-skip="1">
+          </div>
+
+          <div id="cs-split-section" class="split-section hidden">
+            <p id="cs-split-message" class="split-message"></p>
+            <div id="cs-split-grid" class="split-grid"></div>
+            <p class="split-use-whole">
+              <a href="#" id="cs-use-whole-link">シート全体をそのまま使う</a>
+            </p>
+          </div>
+
+          <div class="form-row">
+            <label for="cs-seed-input">seed(任意、デフォルト 0)</label>
+            <input type="number" id="cs-seed-input" value="0" step="1">
+          </div>
+
+          <div class="form-row">
+            <button id="cs-generate-btn" class="primary-btn" disabled>キャラクターシート生成</button>
+          </div>
+
+          <p id="cs-error-message" class="form-error hidden"></p>
+          <p id="cs-status-message" class="status-message hidden"></p>
+
+          <div id="cs-overall-progress" class="progress-bar-wrap hidden">
+            <div class="progress-bar-label">
+              <span class="progress-bar-phase">生成中</span>
+              <span class="progress-bar-count" id="cs-overall-progress-count"></span>
+            </div>
+            <div class="progress-bar-track">
+              <div class="progress-bar-fill" id="cs-overall-progress-fill"></div>
+            </div>
+          </div>
+          <div id="cs-step-progress" class="progress-bar-wrap hidden">
+            <div class="progress-bar-label">
+              <span class="progress-bar-phase" id="cs-step-progress-phase">-</span>
+              <span class="progress-bar-count" id="cs-step-progress-count"></span>
+            </div>
+            <div class="progress-bar-track" id="cs-step-progress-track">
+              <div class="progress-bar-fill" id="cs-step-progress-fill"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="gen-col-right">
+        <div id="cs-views-panel">
+          <h3>2. 8方向ビュー</h3>
+          <p class="form-hint" style="margin-top:0;">
+            各タイルの「背景削除」で使う方式:
+            <select id="cs-bgmethod-input" style="font-size:12px; padding:2px 6px;">
+              <option value="anime" selected>アニメ・キャラクター向け(anime-segmentation)</option>
+              <option value="rembg">汎用(rembg / isnet-general-use)</option>
+            </select>
+          </p>
+          <div id="cs-views-grid" class="views-grid"></div>
+        </div>
+
+        <div id="cs-sheet-panel" class="hidden">
+          <h3>3. キャラクターシート</h3>
+          <img id="cs-sheet-image" class="sheet-image" alt="キャラクターシート">
+          <div class="form-row">
+            <button id="cs-download-zip-btn">一括ダウンロード (ZIP)</button>
+            <button id="cs-download-sheet-btn" class="secondary">シート画像のみダウンロード</button>
+            <button id="cs-remove-bg-all-btn" class="secondary">全方向の背景を削除</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="gallery-panel">
+    <h2>ギャラリー</h2>
+    <div class="gallery-toolbar">
+      <span id="gallery-count">0 件</span>
+      <button id="gallery-clear-btn" class="tiny-btn secondary">ギャラリーをクリア</button>
+    </div>
+    <div id="gallery-grid" class="gallery-grid"></div>
+  </section>
+
+</main>
+
+<div id="lightbox" class="lightbox hidden">
+  <span id="lightbox-close" class="lightbox-close">&times;</span>
+  <img id="lightbox-image" class="lightbox-image" alt="拡大表示">
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

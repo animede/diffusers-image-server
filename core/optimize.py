@@ -1,0 +1,666 @@
+# -*- coding: utf-8 -*-
+"""
+offload 自動判定 / attention backend 切替 / torch.compile 適用の共通関数群。
+
+抽出元:
+  - Ｑwenimage-edit-diffusers/pipeline_manager.py
+    - _auto_offload_mode() (行361-368)
+    - _OFFLOAD_ALIASES / _VALID_OFFLOAD_MODES (行371-387)
+    - _resolve_offload_mode() (行390-404)
+    - _smoke_test_attention_backend() (行522-529)
+    - apply_attention_backend() (行532-561)
+    - apply_compile() (行564-583)
+    - _apply_group_offload_to_transformer() (行589-599)
+    - _apply_whole_module_swap_offload() (行602-610)
+    - configure_transformer_offload() (行613-623)
+    - configure_shared_offload() (行646-657)
+  - flux2_diffusers/pipeline_manager.py
+    - KNOWN_GOOD_ATTN_BACKENDS / KNOWN_BAD_ATTN_BACKEND_PREFIXES (行54-70、
+      Ｑwenimage-edit-diffusers 側と同一の知見。core.config に統合済み)
+    - _apply_offload() (flux2 独自の "model"/"none"/"group" 三択、行138-181) — Flux2Pipeline は
+      enable_model_cpu_offload() をパイプライン単位で持つため、Qwen系の
+      transformer 単位オフロードとは別に flux2 固有の適用関数として残す
+    - _apply_attention_backend() / _apply_compile() (行210-289、Qwen 側とほぼ同一実装)
+
+方針:
+  - offload 自動判定・attention backend・compile の「判定ロジック」は Qwen 側(より詳細な
+    group/group_lowvram/model_cpu の三段階 + GGUF閾値緩和)をベースに共通化する。
+    flux2 側は model_cpu_offload が既定でパイプライン単位のため、Phase 2 で
+    families/flux2.py 側から個別に呼び出す薄いラッパー(apply_flux2_offload)を用意する。
+  - sm_120 で sage 系 attention 不可の知見は core.config の KNOWN_GOOD_ATTN_BACKENDS /
+    KNOWN_BAD_ATTN_BACKEND_PREFIXES に統合済み(両ワークスペースで完全一致していたため)。
+  - torch の import はモジュールトップレベルで行うが、CUDA 初期化を伴う処理(smoke test 等)は
+    関数内に閉じ込める。
+"""
+import contextlib
+import traceback
+
+import torch
+
+from core.config import (
+    DS_CHARSHEET_GROUP_OFFLOAD_BLOCKS,
+    DS_CHARSHEET_GROUP_OFFLOAD_DISK_PATH,
+    DS_CHARSHEET_GROUP_OFFLOAD_LOW_CPU_MEM,
+    DS_CHARSHEET_GROUP_OFFLOAD_NON_BLOCKING,
+    DS_CHARSHEET_GROUP_OFFLOAD_RECORD_STREAM,
+    DS_CHARSHEET_GROUP_OFFLOAD_USE_STREAM,
+    EDIT_TE_OFFLOAD_AREA_THRESHOLD,
+    EDIT_TE_OFFLOAD_FREE_VRAM_GB_THRESHOLD,
+    GGUF_VRAM_FREE_THRESHOLD_GB,
+    KNOWN_BAD_ATTN_BACKEND_PREFIXES,
+    KNOWN_GOOD_ATTN_BACKENDS,
+    VRAM_FREE_THRESHOLD_GB,
+    VRAM_LOW_THRESHOLD_GB,
+    get_edit_te_offload_mode,
+)
+from core.gpu import free_vram_gb
+
+__all__ = [
+    "auto_offload_mode",
+    "resolve_offload_mode",
+    "apply_attention_backend",
+    "apply_compile",
+    "apply_group_offload_to_transformer",
+    "apply_group_offload_to_transformer_full",
+    "apply_whole_module_swap_offload",
+    "remove_whole_module_swap_offload",
+    "suspended_whole_module_swap_offload",
+    "configure_transformer_offload",
+    "configure_shared_offload",
+    "apply_flux2_offload",
+    "ensure_text_encoder_on_gpu",
+    "enable_text_encoder_cpu_offload",
+    "disable_text_encoder_cpu_offload",
+    "should_offload_edit_text_encoder",
+]
+
+
+# ============================================================================
+# offload 自動判定(Qwen 系: none / group / group_lowvram の三段階)
+# ============================================================================
+def auto_offload_mode(
+    free_gb: float,
+    free_threshold: "float | None" = None,
+    low_threshold: "float | None" = None,
+) -> str:
+    """空き VRAM(GB)からオフロードモードを自動判定する。
+
+    抽出元: Ｑwenimage-edit-diffusers/pipeline_manager.py の _auto_offload_mode()(行361-368)。
+    """
+    free_threshold = VRAM_FREE_THRESHOLD_GB if free_threshold is None else free_threshold
+    low_threshold = VRAM_LOW_THRESHOLD_GB if low_threshold is None else low_threshold
+    if free_gb >= free_threshold:
+        return "none"
+    if free_gb >= low_threshold:
+        return "group"
+    return "group_lowvram"
+
+
+_OFFLOAD_ALIASES = {
+    "cpu": "model_cpu",
+    "cpu_offload": "model_cpu",
+    "model": "model_cpu",
+    "model_cpu_offload": "model_cpu",
+    "group_offload": "group",
+    "group_low": "group_lowvram",
+    "group_low_vram": "group_lowvram",
+    "lowvram": "group_lowvram",
+    "low_vram": "group_lowvram",
+    "off": "none",
+    "cuda": "none",
+    "full_cuda": "none",
+    "disable": "none",
+    "disabled": "none",
+}
+_VALID_OFFLOAD_MODES = {"model_cpu", "group", "group_lowvram", "none"}
+
+
+def resolve_offload_mode(requested: str, free_gb: float, small_transformer_active: bool = False) -> str:
+    """明示指定・エイリアス・"auto" のいずれも解決して最終的なオフロードモードを返す。
+
+    抽出元: Ｑwenimage-edit-diffusers/pipeline_manager.py の _resolve_offload_mode()
+    (行390-404)。small_transformer_active=True の場合、GGUF 等の小さい transformer 向けに
+    "none" 判定の閾値を GGUF_VRAM_FREE_THRESHOLD_GB まで緩和する(元実装のコメント:
+    行264-269 参照)。
+    """
+    requested = requested.strip().lower().replace("-", "_")
+    requested = _OFFLOAD_ALIASES.get(requested, requested)
+    free_threshold = GGUF_VRAM_FREE_THRESHOLD_GB if small_transformer_active else None
+    if requested == "auto":
+        return auto_offload_mode(free_gb, free_threshold=free_threshold)
+    if requested not in _VALID_OFFLOAD_MODES:
+        print(f"[core.optimize] unknown offload mode {requested!r}; falling back to auto")
+        return auto_offload_mode(free_gb, free_threshold=free_threshold)
+    if requested in {"group", "group_lowvram", "none"} and not torch.cuda.is_available():
+        print(f"[core.optimize] CUDA unavailable; {requested} mode falls back to CPU execution")
+        return "none"
+    return requested
+
+
+# ============================================================================
+# attention backend(Qwen / flux2 共通。sm_120 で sage 系不可の知見を統合済み)
+# ============================================================================
+def _smoke_test_attention_backend(backend: str, device: str) -> None:
+    """カーネル起動時にのみ失敗するバックエンド(sm_120非対応の sage等)を検出する。
+
+    抽出元: 両ワークスペースでほぼ同一実装
+      - Ｑwenimage-edit-diffusers/pipeline_manager.py 行522-529
+      - flux2_diffusers/pipeline_manager.py 行184-207(shape の根拠コメントも同じ趣旨)
+    shape は「batch 1, seq 4608(~1024x1024 相当) , 24 heads, head_dim 128」で、
+    sage の失敗パスが長seqでのみ顕在化する点を踏まえた生成時に近い形状。
+    """
+    from diffusers.models.attention_dispatch import AttentionBackendName, dispatch_attention_fn
+
+    q = torch.randn(1, 4608, 24, 128, dtype=torch.bfloat16, device=device)
+    out = dispatch_attention_fn(q, q, q, backend=AttentionBackendName(backend))
+    torch.cuda.synchronize()
+    del q, out
+
+
+def apply_attention_backend(transformer, backend: str, device: str = "cuda") -> None:
+    """transformer の attention backend を設定する。失敗時は警告を出して default のまま。
+
+    抽出元: Ｑwenimage-edit-diffusers/pipeline_manager.py の apply_attention_backend()
+    (行532-561)。flux2_diffusers 側の _apply_attention_backend()(行210-248)も同一ロジック。
+    """
+    backend = (backend or "default").lower()
+    if backend in ("default", ""):
+        return
+
+    if backend.startswith(KNOWN_BAD_ATTN_BACKEND_PREFIXES):
+        print(
+            f"[core.optimize] warning: attention backend {backend!r} is known to be broken "
+            f"on this GPU (sm_120 kernels missing); falling back to default SDPA."
+        )
+        return
+
+    if backend not in KNOWN_GOOD_ATTN_BACKENDS:
+        print(
+            f"[core.optimize] note: attention backend {backend!r} is not in the "
+            f"verified-working list {list(KNOWN_GOOD_ATTN_BACKENDS)}; trying anyway."
+        )
+    try:
+        transformer.set_attention_backend(backend)
+        _smoke_test_attention_backend(backend, device)
+        print(f"[core.optimize] attention backend set to {backend!r}")
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[core.optimize] warning: attention backend {backend!r} is not usable "
+            f"({type(e).__name__}: {e}); falling back to default SDPA."
+        )
+        try:
+            transformer.reset_attention_backend()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def apply_compile(transformer, enabled: bool) -> None:
+    """transformer を torch.compile する(リージョナルコンパイル優先、失敗時は通常コンパイル)。
+
+    抽出元: Ｑwenimage-edit-diffusers/pipeline_manager.py の apply_compile()(行564-583)。
+    flux2_diffusers 側の _apply_compile()(行251-289、bnb 4bit の data-dependent branch に
+    関する注記あり)も同一ロジック。
+    """
+    if not enabled:
+        return
+    try:
+        transformer.compile_repeated_blocks(fullgraph=False, dynamic=False)
+        print("[core.optimize] transformer compiled (regional, compile_repeated_blocks)")
+        return
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[core.optimize] regional compilation failed ({type(e).__name__}: {e}); "
+            f"falling back to plain torch.compile"
+        )
+        traceback.print_exc()
+
+    try:
+        transformer.compile()
+        print("[core.optimize] transformer compiled (plain torch.compile)")
+    except Exception as e:  # noqa: BLE001
+        print(f"[core.optimize] warning: torch.compile failed ({type(e).__name__}: {e}); continuing uncompiled.")
+
+
+# ============================================================================
+# transformer / 共有コンポーネント単位のオフロード適用(Qwen 系)
+# ============================================================================
+def apply_group_offload_to_transformer(transformer, num_blocks: int = 1) -> None:
+    """抽出元: Ｑwenimage-edit-diffusers/pipeline_manager.py の
+    _apply_group_offload_to_transformer()(行589-599)。
+    """
+    print(f"[core.optimize] enabling transformer group offload (num_blocks_per_group={num_blocks})")
+    transformer.enable_group_offload(
+        onload_device=torch.device("cuda"),
+        offload_device=torch.device("cpu"),
+        offload_type="block_level",
+        num_blocks_per_group=num_blocks,
+        non_blocking=True,
+        use_stream=True,
+        low_cpu_mem_usage=True,
+    )
+
+
+def apply_group_offload_to_transformer_full(transformer) -> dict:
+    """transformer を block-level group offloading で GPU/CPU 入れ替える(旧
+    /home/animede/charsheet/pipeline.py の _apply_group_offload_to_transformer()
+    (行282-334)の完全移植、"bf16-group" 方式専用)。
+
+    apply_group_offload_to_transformer()(このファイル上部の簡易版、num_blocks のみ
+    引数化)との違い: 旧実装が持っていた全ノブ(use_stream / non_blocking /
+    record_stream / low_cpu_mem_usage / offload_to_disk_path)を DS_* 環境変数
+    (DS_CHARSHEET_GROUP_OFFLOAD_*、core.config 参照)からそのまま復元し、
+    transformer.enable_group_offload() に一言一句同じ引数構成で渡す。既存の簡易版は
+    他の呼び出し元(GGUF等の "group" オフロードモード)に影響するため変更しない。
+
+    抽出元: /home/animede/charsheet/pipeline.py の
+    _apply_group_offload_to_transformer()(行282-334)。ロジック・既定値とも無変更
+    (offload_all_components 分岐は "bf16-group" では常に False 相当 = vae/text_encoder
+    は呼び出し側で別途 GPU 常駐させる。48GB環境では group_lowvram 相当の text_encoder
+    スワップは使わない、タスク指示どおり)。
+    """
+    num_blocks = int(DS_CHARSHEET_GROUP_OFFLOAD_BLOCKS)
+    use_stream = DS_CHARSHEET_GROUP_OFFLOAD_USE_STREAM
+    non_blocking_raw = DS_CHARSHEET_GROUP_OFFLOAD_NON_BLOCKING
+    non_blocking = (
+        use_stream
+        if non_blocking_raw == ""
+        else non_blocking_raw.strip().lower() in {"1", "true", "yes", "on"}
+    )
+    record_stream = DS_CHARSHEET_GROUP_OFFLOAD_RECORD_STREAM
+    low_cpu_mem_usage = DS_CHARSHEET_GROUP_OFFLOAD_LOW_CPU_MEM
+    offload_to_disk_path = DS_CHARSHEET_GROUP_OFFLOAD_DISK_PATH or None
+    if offload_to_disk_path:
+        import os as _os
+
+        _os.makedirs(offload_to_disk_path, exist_ok=True)
+
+    config = {
+        "component": "transformer",
+        "offload_type": "block_level",
+        "num_blocks_per_group": num_blocks,
+        "use_stream": use_stream,
+        "non_blocking": non_blocking,
+        "record_stream": record_stream,
+        "low_cpu_mem_usage": low_cpu_mem_usage,
+        "offload_to_disk_path": offload_to_disk_path,
+    }
+    print(f"[core.optimize] enabling transformer group offload (bf16-group): {config}")
+    transformer.enable_group_offload(
+        onload_device=torch.device("cuda"),
+        offload_device=torch.device("cpu"),
+        offload_type="block_level",
+        num_blocks_per_group=num_blocks,
+        non_blocking=non_blocking,
+        use_stream=use_stream,
+        record_stream=record_stream,
+        low_cpu_mem_usage=low_cpu_mem_usage,
+        offload_to_disk_path=offload_to_disk_path,
+    )
+    return config
+
+
+# 手動スワップ用フックの保持先(module 属性)。suspended_whole_module_swap_offload() が
+# 一時解除・再適用するために、accelerate の UserCpuOffloadHook と forward hook の
+# RemovableHandle を組にして持っておく。
+_SWAP_OFFLOAD_STATE_ATTR = "_ds_swap_offload_state"
+
+
+def apply_whole_module_swap_offload(module) -> None:
+    """module(vae や text_encoder)を使用直前にGPUへ、使用直後にCPUへ丸ごと入れ替える。
+
+    抽出元: Ｑwenimage-edit-diffusers/pipeline_manager.py の
+    _apply_whole_module_swap_offload()(行602-610)。
+    """
+    from accelerate import cpu_offload_with_hook
+
+    _, hook = cpu_offload_with_hook(module, execution_device=torch.device("cuda"))
+
+    def _offload_after_forward(_module, _args, output):
+        hook.offload()
+        return output
+
+    handle = module.register_forward_hook(_offload_after_forward)
+    setattr(module, _SWAP_OFFLOAD_STATE_ATTR, (hook, handle))
+
+
+def remove_whole_module_swap_offload(module) -> bool:
+    """apply_whole_module_swap_offload() で付けたフックを完全に取り外す。
+    取り外した場合 True、元々付いていなければ False を返す。
+    """
+    state = getattr(module, _SWAP_OFFLOAD_STATE_ATTR, None)
+    if state is None:
+        return False
+    hook, handle = state
+    handle.remove()          # forward hook(使用後にCPUへ退避する側)
+    hook.remove()            # accelerate 側の _hf_hook(CpuOffload)
+    setattr(module, _SWAP_OFFLOAD_STATE_ATTR, None)
+    return True
+
+
+@contextlib.contextmanager
+def suspended_whole_module_swap_offload(*modules):
+    """指定モジュールの手動スワップ用フックを、ブロックの間だけ取り外す。
+
+    **`pipe.load_lora_weights()` を呼ぶ箇所は必ずこれで包むこと。** 理由(実機で特定):
+    `apply_whole_module_swap_offload()` は accelerate の `cpu_offload_with_hook()` を使うため
+    モジュールに `_hf_hook`(`CpuOffload`)が付く。diffusers の LoRA ローダは
+    `_func_optionally_disable_offloading()`(`loaders/lora_base.py`)でパイプラインの全
+    コンポーネントを走査し、`CpuOffload` を1つでも見つけると **パイプライン全体が
+    `enable_model_cpu_offload()` 済み** と判定する。その結果、
+    1. こちらのスワップ用フックが `remove_hook_from_module()` で勝手に剥がされ、
+    2. LoRA ロード後に `_pipeline.enable_model_cpu_offload()`(`loaders/peft.py`)が呼ばれて
+       transformer を含む全コンポーネントに accelerate のフックが付け直される
+    という2つの副作用が起きる。これが group_lowvram で
+    - 生成時の `Expected all tensors to be on the same device`(TEがCPUに取り残される)
+    - group offload との衝突(`KeyError` / "already applying an alternative offloading strategy")
+    の原因だった(RTX 4000 SFF Ada 20GB で再現・特定)。
+
+    フックを外しておけば `is_model_cpu_offload=False` / `is_group_offload=True` と正しく判定され、
+    diffusers 自身が LoRA ロード後に `_maybe_remove_and_reapply_group_offloading()` で
+    group offload を(設定を保持したまま)再構築してくれる。**そのため group offload は
+    従来どおり LoRA より前に適用してよい**(順序を入れ替える必要はない)。
+    """
+    suspended = [m for m in modules if m is not None and remove_whole_module_swap_offload(m)]
+    try:
+        yield
+    finally:
+        for m in suspended:
+            apply_whole_module_swap_offload(m)
+
+
+def configure_transformer_offload(transformer, offload_mode: str) -> None:
+    """transformer 単体へのオフロード適用(none / group / group_lowvram で共通処理)。
+    model_cpu は呼び出し側でパイプライン単位に enable_model_cpu_offload() を使う。
+
+    抽出元: Ｑwenimage-edit-diffusers/pipeline_manager.py の configure_transformer_offload()
+    (行613-623)。
+    """
+    if offload_mode == "none":
+        transformer.to("cuda")
+    elif offload_mode == "group":
+        apply_group_offload_to_transformer(transformer)
+    elif offload_mode == "group_lowvram":
+        apply_group_offload_to_transformer(transformer)
+    # "model_cpu" はここでは何もしない(呼び出し側でパイプライン単位に処理)
+
+
+def configure_shared_offload(vae, text_encoder, offload_mode: str) -> None:
+    """共有コンポーネント(vae / text_encoder)へのオフロード適用。プロセス内で一度だけ呼ぶ。
+
+    抽出元: Ｑwenimage-edit-diffusers/pipeline_manager.py の configure_shared_offload()
+    (行646-657)。
+    """
+    if offload_mode in ("none", "group"):
+        # vae は小さいので常時 GPU 常駐。text_encoder も group では常駐のままにする
+        # (transformer のみブロック単位でオフロードする方が効果的なため)。
+        vae.to("cuda")
+        text_encoder.to("cuda")
+    elif offload_mode == "group_lowvram":
+        # 24GB級カード向け: text_encoder(bf16で~16GB)も使用直前/直後でGPU<->CPU入れ替え。
+        vae.to("cuda")
+        apply_whole_module_swap_offload(text_encoder)
+    # "model_cpu" はここでは何もしない(呼び出し側でパイプライン単位に処理)
+
+
+# ============================================================================
+# flux2 固有: パイプライン単位オフロード(model_cpu_offload / none / group)
+# ============================================================================
+def apply_flux2_offload(pipe, mode: str, device: str = "cuda", group_stream: bool = True) -> None:
+    """Flux2Pipeline 全体へのオフロード適用。
+
+    抽出元: flux2_diffusers/pipeline_manager.py の _apply_offload()(行138-181)。
+    Flux2Pipeline は enable_model_cpu_offload() をパイプライン単位に持つため、Qwen 系の
+    transformer 単位オフロード(configure_transformer_offload)とは別関数にしている。
+
+    - "model" / "model_cpu_offload"(既定): enable_model_cpu_offload()
+    - "none": 全コンポーネントを GPU 常駐
+    - "group" / "group_offload": leaf_level の group offload
+      (group_stream=True: CUDA-stream prefetch、CPU RAM にピン止めされるため bf16 では
+       RAM を超える可能性がある。group_stream=False: 同期転送、mmap 経由でディスクから
+       ストリームするため遅いが RAM 超過時でも動く。flux2_diffusers 行156-172 のコメント参照)
+    """
+    mode = (mode or "model").lower()
+    if mode in ("model", "model_cpu_offload"):
+        pipe.enable_model_cpu_offload()
+    elif mode == "none":
+        pipe.to(device)
+    elif mode in ("group", "group_offload"):
+        from diffusers.hooks import apply_group_offloading
+
+        onload_device = torch.device(device)
+        offload_device = torch.device("cpu")
+        common = dict(
+            onload_device=onload_device,
+            offload_device=offload_device,
+            offload_type="leaf_level",
+            use_stream=group_stream,
+        )
+        # transformer は diffusers ModelMixin -> ネイティブメソッド
+        pipe.transformer.enable_group_offload(**common)
+        # text_encoder(Mistral3 等)は transformers モデル -> functional API
+        apply_group_offloading(pipe.text_encoder, **common)
+        # VAE は小さいので常駐
+        pipe.vae.to(onload_device)
+        print(f"[core.optimize] group offload enabled (leaf_level, use_stream={group_stream})")
+    else:
+        raise ValueError(f"Unknown offload mode: {mode!r}")
+
+
+# ============================================================================
+# Edit系: text_encoder の CPU 退避(プロンプトエンコード後にCPUへ、次回エンコード前にGPUへ)
+# ============================================================================
+# 背景(REBUILD_PLAN §4.5 / タスク指示): 48GB専有では共有 text_encoder(~16GB)を
+# VRAM常駐させたまま Edit の標準解像度(1024²相当)を生成すると、VAE decode の一時ピーク
+# (~5GB)が乗って OOM する(CLAUDE.md 3番)。fp8-lightning transformer(~20GB)+ VAE +
+# decodeピークだけなら1024²は収まる見込みのため、「テキストエンコード完了後に
+# text_encoder を CPU へ退避し、denoise/VAE decode の間は空けておく」方式で対処する。
+#
+# 実装方式の選定(タスク指示: fp8 layerwise cast 済み transformer と
+# enable_model_cpu_offload() の相性は未検証のため、確実に動く方法を実測で選ぶこと):
+# QwenImageEditPlusPipeline.__call__()(diffusers/pipelines/qwenimage/
+# pipeline_qwenimage_edit_plus.py)はプロンプトエンコード(self.encode_prompt()、
+# true_cfg_scale>1 なら正負2回)を prepare_latents/denoise/decode より必ず先に呼ぶ
+# 一枚岩の実装で、エンコードと denoise の間にコールバックフックが無い。そのため
+# pipe.encode_prompt を実行時にラップし、「呼び出し後に text_encoder を CPU へ退避 +
+# empty_cache」を行う手動 swap 方式を採用した(model_cpu_offload はパイプライン全体の
+# hook 機構を使うため、transformer 側の enable_layerwise_casting(fp8_e4m3fn) の hook と
+# 競合するリスクがあり、手動 swap の方が確実に安全)。
+#
+# 重要(実機デバッグで特定): text_encoder の GPU 復帰は encode_prompt 呼び出し内では
+# 手遅れ。QwenImageEditPlusPipeline.__call__() は encode_prompt を呼ぶより前に
+# `device = self._execution_device` を解決し、この device を encode_prompt に明示的に
+# 渡す。_execution_device は「最初に見つかった nn.Module の現在地」を返す実装のため、
+# text_encoder が CPU に残ったまま pipe(...) を呼ぶと device 自体が "cpu" に解決されて
+# しまい、encode_prompt 内で text_encoder を GPU へ戻しても processor の出力
+# (input_ids 等)は既に "cpu" 向けに作られてしまう(device mismatch エラーになることを
+# 実機で再現・特定した)。そのため GPU 復帰は ensure_text_encoder_on_gpu() として分離し、
+# 呼び出し側(families/qwen_image/generate.py)が pipe(...) を呼ぶ直前に明示的に呼ぶ。
+#
+# encode_prompt は true_cfg_scale>1 かつ negative_prompt 指定時に正負で2回連続して
+# 呼ばれる(その間に denoise 等の重い処理は挟まらない)。呼び出しごとに素朴に
+# CPU<->GPU を往復すると2回分の往復コストがかかるが、実装を単純にして「denoise/decode
+# 開始前に必ず text_encoder が CPU にある」ことを保証する方を優先する(タスク指示:
+# 「TE往復のオーバーヘッドは許容」)。
+
+
+def should_offload_edit_text_encoder(
+    width: "int | None", height: "int | None", *, gguf_full_tier: bool = False, pipe=None
+) -> bool:
+    """DS_EDIT_TE_OFFLOAD(auto/on/off)から、この生成で text_encoder CPU退避を使うか判定する。
+
+    auto の主判定は要求解像度(height*width、未指定なら参照画像から自動推定される
+    1024²相当とみなす)。EDIT_TE_OFFLOAD_AREA_THRESHOLD(既定 640*640=409600px)以上なら
+    退避を有効にする。空きVRAMは「現在どれだけ空いているか」であって「この生成が
+    どれだけVRAMを必要とするか」の代理指標にはならない(このプロセスの初回ロード前は
+    常に空き~47GBだが、1024²生成自体がTE常駐のままだとOOMする実績があるため、
+    空きVRAMの大小で判定を反転させてはいけない)。そのため空きVRAMは「大容量カードでは
+    退避自体が不要」というエスケープハッチとしてのみ使う: 空きVRAMが
+    EDIT_TE_OFFLOAD_FREE_VRAM_GB_THRESHOLD(既定 44.0GB、この環境の48GB専有相当)を
+    大きく超える場合(+TE分16GBの余裕を見て、閾値+16GB以上)は解像度に関わらず退避不要と
+    判定する。
+
+    charsheet 経路(既定 CHARSHEET_EDIT_SIZE=1024)は640*640閾値を超えるため auto で
+    実質 on になる(タスク指示どおり)。
+
+    gguf_full_tier: GGUF Edit の "full" tier(transformer 12.32GiB 常駐 + TE bf16
+    15.6GiB 常駐 = 合計 ~30GB)から呼ばれている場合 True にする(2026-08-16、
+    CLAUDE.md 60番)。EDIT_TE_OFFLOAD_FREE_VRAM_GB_THRESHOLD(既定44.0)は
+    fp8-lightning 構成(bf16 38GB transformer 常駐)を前提にチューニングされた値で、
+    GGUF full tier はそもそも合計 ~30GB しか使わず 48GB 専有環境に余裕で収まるため、
+    TE の CPU⇔GPU 往復(実測 ~5秒/生成)は丸ごと無駄なオーバーヘッドになる。実測で
+    B(full+TE off)がC(te_fp8 tier nf4)と同等かそれ以上に速い(9.15s vs 9.14s)ことを
+    確認済みなので、auto モード時のみ退避を無効化する(`DS_EDIT_TE_OFFLOAD=on` の
+    明示指定は引き続き尊重し、この分岐より前に return する)。
+    """
+    mode = get_edit_te_offload_mode("auto")
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+    # auto: GGUF full tier は合計VRAM使用量がfp8-lightning構成の閾値前提より小さく
+    # (実測ピーク~30GB)、TE退避は速度を落とすだけの無駄なオーバーヘッドのため無効化する。
+    if gguf_full_tier:
+        return False
+    # auto: 要求解像度から総画素数を見積もる(未指定なら自動推定と同じ1024²相当とみなす)。
+    area = (width or 1024) * (height or 1024)
+    if area < EDIT_TE_OFFLOAD_AREA_THRESHOLD:
+        return False
+    # 大容量VRAM環境(空きが閾値+TE分を大きく超える)では退避しなくても収まるため不要と判定。
+    free_gb = free_vram_gb()
+    # 発振防止の正規化(2026-08-17、CLAUDE.md 63番): 「空きVRAM」は text_encoder が
+    # 今どちら(GPU/CPU)にいるかで TE 実サイズ分(bf16で~15.6GB)変わる。前回の判定結果が
+    # TE の現在地を決め、それが今回の測定値を動かすフィードバックループになるため、
+    # 2状態が閾値(44+16=60GB)を挟む環境(実測: 96GBカード + fp8-lightning Edit で
+    # TE on GPU時 空き58GB / TE on CPU時 73GB)では判定が1リクエストごとに反転し、
+    # 生成時間が 2.6s ⇔ 7.0s でトグルする。対策: TE が現在 CPU にいる場合はその
+    # パラメータ実サイズを空きから差し引き、常に「TE が GPU に載っている状態」に
+    # 正規化してから閾値比較する(判定が TE の現在地に依存しなくなる)。
+    # 旧実装の「+16.0GB」マージンは「測定時に TE がどちらにいるか分からない」曖昧さを
+    # 吸収するためのものだった。正規化できた場合(pipe あり)は測定が常に
+    # 「TE on GPU」状態に揃うためマージンは外す(付けたままだと 96GB カードの
+    # 正規化後空き ~58GB が 60GB を割り、常時退避=遅い側に安定してしまう。実測)。
+    margin_gb = 16.0
+    if pipe is not None:
+        te = getattr(pipe, "text_encoder", None)
+        if te is not None:
+            try:
+                first_param = next(te.parameters())
+            except StopIteration:
+                first_param = None
+            if first_param is not None:
+                margin_gb = 0.0
+                if first_param.device.type == "cpu":
+                    te_gb = sum(p.numel() * p.element_size() for p in te.parameters()) / 1024**3
+                    free_gb -= te_gb
+    return free_gb < (EDIT_TE_OFFLOAD_FREE_VRAM_GB_THRESHOLD + margin_gb)
+
+
+def _is_bnb_quantized_text_encoder(text_encoder) -> bool:
+    """text_encoder が bnb 4bit/8bit 量子化済みかどうか(2026-08-16追加、CLAUDE.md 59番の
+    nf4化タスク)。
+
+    bnb 量子化モデルは `.to()` によるデバイス移動が本来の設計上の対象外(CLAUDE.md 42番)で、
+    GGUF Edit 24GB級ティア(DS_EDIT_GGUF_MID_TE_QUANT=nf4)は常時GPU常駐のまま運用する設計
+    (nf4常駐は実測5.54GiBと小さく、往復させる必要自体が無い)のため、手動TE CPU退避
+    (enable_text_encoder_cpu_offload 系)はこの判定で確実に no-op にする。
+    """
+    return bool(getattr(text_encoder, "is_loaded_in_4bit", False) or getattr(text_encoder, "is_loaded_in_8bit", False))
+
+
+def ensure_text_encoder_on_gpu(pipe) -> None:
+    """text_encoder が CPU にあれば GPU へ戻す(呼び出し側が pipe(...) を呼ぶ直前に使う)。
+
+    重要な注意(実機デバッグで判明): QwenImageEditPlusPipeline.__call__() は
+    `device = self._execution_device` を **encode_prompt を呼ぶより前**(prompt_embeds
+    計算より前の行)で解決する。`self._execution_device`(= `self.device`)は
+    `_get_signature_keys()` 順で最初に見つかった `nn.Module`(text_encoder 等)の
+    `.device` を返す実装のため、pipe(...) 呼び出し時点で text_encoder が CPU に
+    残っていると、__call__ 内で解決される `device` 変数自体が "cpu" になってしまう。
+    この `device` は encode_prompt() に明示的に渡され、processor の出力(input_ids 等)を
+    `.to(device)` する際に使われるため、encode_prompt 側(_wrapped_encode_prompt)で
+    text_encoder を GPU へ戻すだけでは手遅れ(input_ids が cpu、embed_tokens.weight が
+    cuda という食い違いで `RuntimeError: Expected all tensors to be on the same device`
+    になることを実機で再現・特定した)。そのため text_encoder の GPU 復帰は
+    **pipe(...) を呼ぶ直前**に呼び出し側(families/qwen_image/generate.py の
+    run_edit()/run_edit_angles())で明示的に行う。
+
+    bnb 4bit/8bit 量子化された text_encoder は常時GPU常駐(device_map={"":0})の設計
+    (CLAUDE.md 59番のnf4化タスク)のため、no-op で早期returnする(`.to()` を極力
+    呼ばない方針。実際には常にcuda上にあるため元々no-opになるはずだが、bnbモデルへの
+    `.to()` 呼び出し自体を避けるため明示的にガードする)。
+    """
+    if not torch.cuda.is_available():
+        return
+    text_encoder = pipe.text_encoder
+    if _is_bnb_quantized_text_encoder(text_encoder):
+        return
+    if next(text_encoder.parameters()).device.type != "cuda":
+        text_encoder.to("cuda")
+
+
+def enable_text_encoder_cpu_offload(pipe) -> None:
+    """pipe.encode_prompt をラップし、呼び出し後に text_encoder を CPU へ退避する
+    (手動 swap 方式)。同一 pipe に複数回呼んでも二重ラップしない。
+
+    呼び出し側の責務(重要): pipe(...) を呼ぶ**前**に ensure_text_encoder_on_gpu(pipe) を
+    別途呼ぶこと。__call__ 内の `_execution_device` 解決タイミングの都合上、
+    encode_prompt 呼び出し時点で GPU へ戻すのでは遅い(上記 ensure_text_encoder_on_gpu()
+    のdocstring参照)。
+
+    bnb 4bit/8bit 量子化された text_encoder(GGUF Edit 24GB級ティアの
+    DS_EDIT_GGUF_MID_TE_QUANT=nf4)が渡された場合は no-op にする(2026-08-16追加、
+    CLAUDE.md 59番のnf4化タスク)。理由: (a) bnb 量子化モデルは `.to()` によるデバイス
+    移動が本来の設計上の対象外(CLAUDE.md 42番)、(b) nf4 常駐は実測5.54GiBと小さく
+    denoise/decode中も常駐のまま(GGUF transformer 12.32GB + nf4 TE 5.54GB + decode一時
+    ピーク)で24GB級に収まる設計のため、そもそも退避が不要。
+    """
+    if getattr(pipe, "_ds_te_offload_enabled", False):
+        return
+    if not torch.cuda.is_available():
+        return
+    if _is_bnb_quantized_text_encoder(pipe.text_encoder):
+        print(
+            "[core.optimize] text_encoder is bnb-quantized (nf4/int8); "
+            "skipping manual CPU offload (常時GPU常駐のまま運用)"
+        )
+        return
+
+    original_encode_prompt = pipe.encode_prompt
+
+    def _wrapped_encode_prompt(*args, **kwargs):
+        # 2026-07-18バグ修正: 呼び出し冒頭で毎回 text_encoder を GPU へ戻す。
+        # true_cfg_scale>1 かつ negative_prompt 指定時、QwenImagePipeline 系は
+        # encode_prompt を正・負で2回連続して呼ぶが、旧実装は1回目の finally で
+        # TE を CPU へ退避したまま2回目に入るため、2回目の embed_tokens が CPU、
+        # input_ids が cuda(__call__ 冒頭で解決済みの device)という食い違いで
+        # "Expected all tensors to be on the same device ... (wrapper_CUDA__index_select)"
+        # になる(実機再現済み: 無印T2I・lightning=false・UI既定negative_prompt で発症。
+        # Lightning時は cfg=1.0 で negative が無効になり1回しか呼ばれないため発症しない)。
+        # 冒頭でGPUへ戻すことでN回連続エンコードでも安全になる(呼び出し後にCPUへ退避、
+        # は従来どおり維持。往復コストは許容方針)。
+        if torch.cuda.is_available() and next(pipe.text_encoder.parameters()).device.type != "cuda":
+            pipe.text_encoder.to("cuda")
+        try:
+            result = original_encode_prompt(*args, **kwargs)
+        finally:
+            pipe.text_encoder.to("cpu")
+            torch.cuda.empty_cache()
+        return result
+
+    pipe.encode_prompt = _wrapped_encode_prompt
+    pipe._ds_te_offload_enabled = True
+    pipe._ds_te_offload_original_encode_prompt = original_encode_prompt
+    print("[core.optimize] text_encoder CPU offload enabled (manual swap around encode_prompt)")
+
+
+def disable_text_encoder_cpu_offload(pipe) -> None:
+    """enable_text_encoder_cpu_offload() で施したラップを解除し、text_encoder を GPU へ戻す。"""
+    if not getattr(pipe, "_ds_te_offload_enabled", False):
+        return
+    pipe.encode_prompt = pipe._ds_te_offload_original_encode_prompt
+    del pipe._ds_te_offload_original_encode_prompt
+    pipe._ds_te_offload_enabled = False
+    if torch.cuda.is_available():
+        pipe.text_encoder.to("cuda")
+        torch.cuda.empty_cache()
+    print("[core.optimize] text_encoder CPU offload disabled (text_encoder back on GPU)")
