@@ -58,14 +58,18 @@ diffusers-server 本体の `DS_CHARSHEET_METHOD` 4方式(bf16-group 等)は移�
    angles を adapter ロード → `enable_layerwise_casting(fp8_e4m3fn)` の順。
    **fp8 キャスト後に LoRA をロードすると lora_A/lora_B が fp8 dtype で作られ
    `addmm_cuda not implemented for Float8_e4m3fn` で落ちる**。
-3. **トグルは必ず `enable_lora()` → `set_adapters([...])` の順**
+3. **fal 2511 LoRA は raw の state_dict をそのまま `load_lora_adapter()` に渡すこと**
+   (既に "transformer." プレフィックス付き PEFT 形式のため、
+   `_convert_non_diffusers_qwen_lora_to_diffusers()` を通すとプレフィックスが二重になり
+   `Target modules {...} not found` で失敗する。実機で確認済み、初期実装のバグ)。
+4. **トグルは必ず `enable_lora()` → `set_adapters([...])` の順**
    (`set_adapters()` は PEFT の `_disable_adapters` フラグをクリアしないため、
    `enable_lora()` を先に呼ばないと完全 no-op になる。元 62番の実バグ)。
-4. **angles 残留リセット**: fp8-lightning 構成では `set_edit_lightning()` が
+5. **angles 残留リセット**: fp8-lightning 構成では `set_edit_lightning()` が
    アダプタ状態を触らない(fuse 済みで常時 True)ため、通常 Edit / Edit-I2I は
    必ず `set_edit_angles(pipe, False)` を呼んで charsheet の angles を外す
    (`generate.py` の run_edit()/run_edit_i2i() 冒頭)。
-5. プロンプトは構造化タグ `<sks> [azimuth] eye-level shot medium shot`
+6. プロンプトは構造化タグ `<sks> [azimuth] eye-level shot medium shot`
    (`apps/charsheet/prompts.py` VIEWS_LORA_2511、元 67番)。
 
 ## 元リポジトリから引き継ぐ主要な罠(要点のみ、詳細は元 CLAUDE.md の番号)

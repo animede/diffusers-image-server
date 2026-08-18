@@ -613,7 +613,16 @@ def _apply_angles_adapter(transformer) -> None:
         angles_path = resolve_model_path(
             EDIT_LORA_ANGLES_PATH, EDIT_LORA_ANGLES_HF_REPO, EDIT_LORA_ANGLES_HF_FILE
         )
-        angles_sd = _convert_non_diffusers_qwen_lora_to_diffusers(load_file(angles_path))
+        raw_sd = load_file(angles_path)
+        if any(k.startswith("transformer.") for k in raw_sd):
+            # fal 2511 LoRA は既に "transformer." プレフィックス付き PEFT 形式(1680キー)。
+            # ここへ _convert_non_diffusers_qwen_lora_to_diffusers() を通すとプレフィックスが
+            # 二重になり "Target modules {...} not found" で失敗する(実機で確認、
+            # probe_gguf_charsheet.py が raw load_file を直接渡していたのはこのため)。
+            angles_sd = raw_sd
+        else:
+            # 旧2509 LoRA(DS_ANGLES_LORA=2509)等、無プレフィックス/ComfyUI形式向け。
+            angles_sd = _convert_non_diffusers_qwen_lora_to_diffusers(raw_sd)
         transformer.load_lora_adapter(angles_sd, adapter_name="angles", prefix="transformer")
         # 既定は無効(通常 Edit では angles を効かせない)。有効化は set_edit_angles() が
         # enable_lora() -> set_adapters([...]) の順で行う(CLAUDE.md 62番の no-op バグ対策)。
