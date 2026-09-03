@@ -13,6 +13,8 @@ venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8620
 DS_LLM_URL=http://127.0.0.1:64650 venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8620
 # 24GB級カードで GGUF 既定にする場合
 CUDA_VISIBLE_DEVICES=1 DS_QUANT=gguf-q4_k_m venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8620
+# 20GB級カードで参照画像ありEditを使う場合
+CUDA_VISIBLE_DEVICES=1 DS_QUANT=gguf-q4_k_m DS_OFFLOAD=model_cpu venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8620
 ```
 
 UI: http://localhost:8620/ (タブ: 画像生成/編集(Edit統合)・Inpaint・アウトペイント・キャラシート)
@@ -49,11 +51,25 @@ LoRA の transformer-level アダプタ**で8方向を生成する(通常 Edit �
 | Edit fp8-lightning(既定、48GB級以上) | ピーク ~35GB(1024²、TE退避込み) |
 | Edit GGUF Q4_K_M full tier(空き>=30GB) | ピーク ~30GB |
 | Edit GGUF Q4_K_M gguf_te_fp8 tier(24GB級、TE nf4) | ピーク ~20.6GB |
+| Edit GGUF Q4_K_M model_cpu tier(20GB級) | ピーク 17.30GB(参照画像3枚、512²、4 steps) |
 | charsheet(Edit GGUF + lightning+angles アダプタ、96GB機) | ピーク ~38.8GB(probe実測、bf16 TE 常駐) |
 | JoyAI bf16 | ピーク ~33GB |
 | JoyAI GGUF Q4_K_M | ピーク ~20.8GB |
 | T2I 2512 fp8-lightning | ピーク ~35GB |
 | Inpaint / アウトペイント(tiled VAE 既定) | ピーク ~39GB(1280×720) |
+
+### 20GB級カードでのQ4_K_M model_cpu運用
+
+RTX 4000 SFF Ada 20GBで参照画像ありEditを使う場合は、`Q4_K_M` transformerと
+`DS_OFFLOAD=model_cpu`を使用する。Q3_K_M全常駐では参照画像1枚・768²のみ成功したが、
+896²および参照画像3枚・512²でOOMしたため、汎用運用には採用しない。model_cpu tierは
+transformerと共有コンポーネントを使用段階に応じてCPU/GPU間で移動するため低速になるが、
+全常駐用に量子化精度をQ3へ下げる必要がなく、Q4_K_Mの品質を維持できる。
+参照画像3枚・512²・4 stepsは実機で生成に成功(77.90s、ピーク17.30GB)。
+
+20GB級の空きVRAMは自動tier判定の既定閾値21.5GBを下回るため、transformerをGPU常駐させる
+には`DS_OFFLOAD=gguf_te_fp8`を明示すること。Inpaint / アウトペイントはQ3_K_L Edit経路を
+使用せず、実測ピーク約39GBのControlNet構成をロードするため、20GBカードでは利用不可。
 
 ## 注意
 

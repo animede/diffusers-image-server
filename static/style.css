@@ -1,26 +1,26 @@
 :root {
-  /* ベース(ライト・ニュートラル) */
-  --color-bg: #f4f6fb;
-  --color-bg-gradient: linear-gradient(180deg, #f7f8fd 0%, #eef1fa 100%);
-  --color-panel: #ffffff;
-  --color-panel-soft: #f8f9fd;
-  --color-border: #e3e7f2;
-  --color-border-soft: #edf0f8;
+  color-scheme: dark;
+  --color-bg: #0c0b0a;
+  --color-bg-gradient: radial-gradient(circle at 82% 0%, #342318 0, transparent 30%), #0c0b0a;
+  --color-panel: rgba(21, 19, 17, 0.88);
+  --color-panel-soft: #100f0e;
+  --color-border: #35302b;
+  --color-border-soft: #2b2723;
 
-  /* アクセント(パステル寄りの青紫) */
-  --color-primary: #5457e0;
-  --color-primary-hover: #4548c9;
-  --color-primary-soft: #eef0ff;
-  --color-primary-softer: #f5f6ff;
-  --color-accent-pink: #ec4899;
-  --color-accent-teal: #14b8a6;
-  --color-accent-amber: #d97706;
-  --color-accent-purple: #8b5cf6;
-  --color-accent-rose: #db2777;
+  /* LTX-2.5 のアクセントを淡いアプリコットへ置換 */
+  --color-primary: #ffc58f;
+  --color-primary-hover: #ffd4ad;
+  --color-primary-soft: #35271d;
+  --color-primary-softer: #211912;
+  --color-accent-pink: #efad91;
+  --color-accent-teal: #b9c999;
+  --color-accent-amber: #ffc58f;
+  --color-accent-purple: #eaa87f;
+  --color-accent-rose: #dd8f7d;
 
   /* テキスト */
-  --color-text: #262a3b;
-  --color-subtext: #6b7085;
+  --color-text: #f4f1ea;
+  --color-subtext: #9f9991;
 
   /* 状態色 */
   --color-error: #dc2626;
@@ -31,10 +31,10 @@
   --color-warning-border: #fde3a7;
   --color-warning-text: #a15c00;
 
-  --radius: 14px;
-  --radius-sm: 8px;
-  --shadow-soft: 0 1px 2px rgba(30, 34, 60, 0.04), 0 4px 14px rgba(30, 34, 60, 0.06);
-  --shadow-soft-hover: 0 2px 4px rgba(30, 34, 60, 0.06), 0 8px 24px rgba(30, 34, 60, 0.09);
+  --radius: 18px;
+  --radius-sm: 9px;
+  --shadow-soft: 0 24px 80px rgba(0, 0, 0, 0.36);
+  --shadow-soft-hover: 0 28px 90px rgba(0, 0, 0, 0.5);
 }
 
 * {
@@ -43,27 +43,38 @@
 
 body {
   margin: 0;
-  font-family: "Noto Sans CJK JP", "Hiragino Kaku Gothic ProN", "Yu Gothic",
-    "Segoe UI", sans-serif;
+  font-family: Inter, "Noto Sans CJK JP", "Hiragino Kaku Gothic ProN", "Yu Gothic",
+    system-ui, sans-serif;
   background: var(--color-bg-gradient);
   background-attachment: fixed;
   color: var(--color-text);
 }
 
 .app-header {
-  text-align: center;
-  padding: 32px 16px 8px;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 56px 28px 18px;
+  text-align: left;
+}
+
+.app-header::before {
+  content: "LOCAL IMAGE GENERATION · EDITING STUDIO";
+  display: block;
+  border-left: 2px solid var(--color-primary);
+  padding-left: 22px;
+  color: var(--color-primary);
+  font-size: 11px;
+  letter-spacing: 0.25em;
 }
 
 .app-header h1 {
-  margin: 0 0 6px;
-  font-size: 26px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  background: linear-gradient(90deg, var(--color-primary), var(--color-accent-purple));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  margin: 13px 0 0 24px;
+  max-width: 980px;
+  font-size: clamp(28px, 4vw, 54px);
+  line-height: 0.96;
+  font-weight: 800;
+  letter-spacing: -0.055em;
+  color: var(--color-text);
 }
 
 .subtitle {
@@ -73,10 +84,10 @@ body {
 }
 
 .status-bar {
-  max-width: 1100px;
-  margin: 18px auto 0;
+  max-width: 1384px;
+  margin: 0 auto 10px;
   padding: 10px 18px;
-  background: var(--color-panel);
+  background: rgba(18, 17, 15, 0.82);
   color: var(--color-text);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
@@ -98,9 +109,9 @@ body {
 }
 
 .container {
-  max-width: 1100px;
+  max-width: 1440px;
   margin: 0 auto;
-  padding: 16px 16px 40px;
+  padding: 16px 28px 56px;
   display: flex;
   flex-direction: column;
   gap: 22px;
@@ -215,7 +226,7 @@ body {
   background: var(--color-panel);
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
-  padding: 24px 28px;
+  padding: 26px;
   box-shadow: var(--shadow-soft);
 }
 
@@ -223,7 +234,7 @@ body {
   margin-top: 0;
   font-size: 17px;
   font-weight: 700;
-  border-left: 4px solid var(--color-primary);
+  border-left: 2px solid var(--color-primary);
   padding-left: 12px;
 }
 
@@ -287,12 +298,12 @@ body {
 
 button, .primary-btn {
   background: var(--color-primary);
-  color: white;
+  color: #17110c;
   border: none;
   padding: 10px 22px;
   border-radius: var(--radius-sm);
   font-size: 15px;
-  font-weight: 500;
+  font-weight: 800;
   cursor: pointer;
   box-shadow: var(--shadow-soft);
   transition: background 0.15s, box-shadow 0.15s, transform 0.1s;
@@ -309,8 +320,8 @@ button:active:not(:disabled) {
 }
 
 button:disabled {
-  background: #d3d6e2;
-  color: #8f93a5;
+  background: #37322e;
+  color: #77716b;
   box-shadow: none;
   cursor: not-allowed;
 }
@@ -325,11 +336,12 @@ button:disabled {
 
 .tiny-btn.secondary {
   background: var(--color-primary-soft);
-  color: var(--color-primary-hover);
+  color: var(--color-primary);
+  border: 1px solid #594332;
 }
 
 .tiny-btn.secondary:hover:not(:disabled) {
-  background: #e2e4ff;
+  background: #493424;
   box-shadow: none;
 }
 
@@ -1352,3 +1364,45 @@ button:disabled {
 .alpha-refine-controls input[type="range"] { width:100%; }
 .alpha-refine-actions { justify-content:flex-end; padding:8px 0 0; }
 @media (max-width:700px) { .alpha-refine-controls { grid-template-columns:1fr; } }
+
+/* --- LTX-2.5 studio theme refinements --- */
+::selection { background:var(--color-primary); color:#17110c; }
+.gen-form select,
+.gen-form textarea,
+.gen-form input[type="number"],
+.gen-form input[type="text"],
+.gen-form input[type="file"] { width:100%; background:#0e0d0c; border-color:#3b3530; color:var(--color-text); }
+.gen-form select { display:block; margin-top:4px; padding:9px 11px; border:1px solid #3b3530; border-radius:var(--radius-sm); font:inherit; }
+.gen-form input[type="checkbox"] { accent-color:var(--color-primary); }
+.gen-form input[type="file"]::file-selector-button { margin-right:10px; padding:6px 10px; border:1px solid #554235; border-radius:6px; background:var(--color-primary-soft); color:var(--color-primary); cursor:pointer; }
+.tabs { gap:8px; padding-bottom:8px; }
+.tab-btn { padding:11px 18px; border:1px solid transparent; border-radius:999px; font-size:13px; letter-spacing:.02em; }
+.tab-btn.active { border-color:#614936; background:var(--color-primary-soft); }
+.tab-btn:hover:not(.active) { border-color:var(--color-border); }
+.panel-note,.progress-bar-wrap,.result-panel,.gallery-card,.view-tile,.gd-dropzone { background:#100f0e; }
+.result-panel { min-height:420px; justify-content:center; }
+.result-panel:has(.result-panel-image) { justify-content:flex-start; }
+.result-placeholder::before { content:""; display:block; width:118px; height:118px; margin:0 auto 26px; border-radius:50%; background:radial-gradient(circle at 35% 30%,#fff0dd,#ffc58f 15%,#765038 43%,#111 72%); box-shadow:0 0 76px rgba(255,197,143,.18); }
+.primary-btn { width:100%; justify-content:space-between; padding:15px 18px; }
+.progress-bar-fill { background:var(--color-primary); }
+.form-error { color:#ff9d90; background:#261513; border-color:#63322c; }
+.gallery-card-mode,
+.gallery-card-mode.mode-i2i,
+.gallery-card-mode.mode-edit,
+.gallery-card-mode.mode-controlnet,
+.gallery-card-mode.mode-inpaint,
+.gallery-card-mode.mode-layered,
+.gallery-card-mode.mode-flux2_t2i,
+.gallery-card-mode.mode-flux2_i2i { background:var(--color-primary-soft); border:1px solid #614936; color:var(--color-primary); }
+a,#tab-charsheet .split-use-whole a { color:var(--color-primary); }
+@media (max-width:850px) {
+  body { overflow-x:hidden; }
+  .app-header { padding:32px 16px 16px; }
+  .app-header h1 { overflow-wrap:anywhere; }
+  .status-bar { margin-right:16px; margin-left:16px; }
+  #status-text { min-width:0; overflow-wrap:anywhere; }
+  .container { padding-right:16px; padding-left:16px; }
+  .panel { padding:20px; }
+  .panel h2 { overflow-wrap:anywhere; }
+  .result-panel { min-height:340px; }
+}

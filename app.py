@@ -27,6 +27,7 @@ import families.qwen_image as qwen_image  # noqa: F401  (import 副作用で reg
 import families.joyai as joyai  # noqa: F401  (import 副作用で registry に登録)
 from apps.charsheet import router as charsheet_router
 from core import bg as bg_mod
+from core import gpu
 from core import llm, progress as progress_mod
 from core.registry import registry
 
@@ -483,15 +484,33 @@ class UnloadRequest(BaseModel):
 @app.post("/api/unload")
 def unload(req: UnloadRequest):
     if req.target == "joyai":
-        return {"joyai": joyai.family.unload()}
-    if req.target not in ("t2i", "edit", "controlnet", "all"):
+        result = {"joyai": joyai.family.unload()}
+    elif req.target not in ("t2i", "edit", "controlnet", "all"):
         raise HTTPException(
             status_code=400,
             detail="target は t2i / edit / controlnet / joyai / all のいずれかです",
         )
-    if req.target == "all":
-        return registry.unload(None)
-    return qwen_image.family.unload_target(req.target)
+    elif req.target == "all":
+        result = registry.unload(None)
+    else:
+        result = qwen_image.family.unload_target(req.target)
+
+    # 解放するモデルが無かった場合でも、PyTorch のキャッシュは必ず返却する。
+    # ここを条件付きにすると「何もロードされていないのに reserved が数GB残る」状態に
+    # なる(実測: freed=[] のとき allocated 0.13GB / reserved 2.34GB が居座り、
+    # nvidia-smi では 2.8GB を占有していた)。
+    # 画像サーバと動画サーバが同一GPUを共有する構成では、この数GBが動画側の
+    # OOM に直結するため、unload は「必ずキャッシュを返す」契約にしておく。
+    def _reserved() -> float:
+        snap = gpu.vram_snapshot() or {}
+        return float(snap.get("reserved_gb") or 0.0)
+
+    before = _reserved()
+    gpu.empty_cache()
+    after = _reserved()
+    if before - after > 0.05:
+        print(f"[unload] released cached VRAM: {before:.2f}GB -> {after:.2f}GB")
+    return result
 
 
 @app.get("/api/progress")
