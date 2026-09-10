@@ -77,3 +77,10 @@ transformerと共有コンポーネントを使用段階に応じてCPU/GPU間�
   **コア修正は両リポジトリへ反映すること**(CLAUDE.md「二重管理注意」参照)。
 - venv へ `pip install` しないこと(共有 venv)。
 - 詳細な運用知見は本リポジトリ CLAUDE.md と元リポジトリ CLAUDE.md(1〜69番)を参照。
+
+## ライセンス
+
+このリポジトリで独自に実装したアプリケーションコードは [Apache License 2.0](LICENSE) で提供します。
+
+> [!IMPORTANT]
+> Apache License 2.0 は Qwen-Image / Qwen-Image-Edit 系モデルの重み、派生 LoRA・チェックポイント、その他の第三者製コンポーネントには適用されません。各モデルのライセンス(Qwen-Image 系は Apache 2.0、fal の Multiple-Angles LoRA は Apache 2.0 等)を個別に確認してください。
