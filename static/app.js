@@ -94,99 +94,115 @@ function showResult(panel, meta) {
   panel.appendChild(info);
 }
 
-// ---------------- 画像生成/編集タブ ----------------
-const GEN_MODES = {
-  "edit":          { api: "edit",  quant: "default" },
-  "edit-gguf":     { api: "edit",  quant: "gguf-q4_k_m" },
-  "t2i-2512":      { api: "t2i",   model: "2512", quant: "fp8-lightning" },
-  "t2i-2512-gguf": { api: "t2i",   model: "2512", quant: "gguf-q4_k_m" },
-  "t2i-qwen":      { api: "t2i",   model: "qwen-image", quant: "fp8-lightning" },
-  "t2i-qwen-gguf": { api: "t2i",   model: "qwen-image", quant: "gguf-q4_k_m" },
-  "i2i-2512":      { api: "i2i",   model: "2512", quant: "default" },
-  "i2i-qwen":      { api: "i2i",   model: "qwen-image", quant: "default" },
-  "joyai":         { api: "joyai", quant: "none" },
-  "joyai-gguf":    { api: "joyai", quant: "gguf-q4_k_m" },
-};
+// ---------------- 生成/編集タブ(edit-form) ----------------
+// モデル選択に応じて表示するパラメータ群を切り替える
+function editModelKind() {
+  const v = $("#edit-model-select").value;
+  if (v.startsWith("joyai")) return "joyai";
+  if (v.startsWith("qwen-2512")) return "qwen2512";
+  return "qwenedit";
+}
 
-$("#gen-mode-select").addEventListener("change", () => {
-  const v = $("#gen-mode-select").value;
-  const isEdit = v.startsWith("edit");
-  const isT2i = v.startsWith("t2i");
-  $("#gen-strength-label").style.display = (isEdit || v.startsWith("i2i")) ? "" : "none";
-  $("#gen-lightning-row").style.display = v.startsWith("joyai") ? "none" : "";
-  $("#gen-image-fields").style.display = isT2i ? "none" : "";
-});
+function updateEditFields() {
+  const kind = editModelKind();
+  $$(".qwen-edit-only-fields").forEach((el) => el.classList.toggle("hidden", kind !== "qwenedit"));
+  $$(".joyai-only-fields").forEach((el) => el.classList.toggle("hidden", kind !== "joyai"));
+  $$(".qwen-2512-only-fields").forEach((el) => el.classList.toggle("hidden", kind !== "qwen2512"));
+}
+$("#edit-model-select").addEventListener("change", updateEditFields);
+updateEditFields();
 
-$("#gen-form").addEventListener("submit", async (ev) => {
+// 生成中の進捗表示(各タブの結果パネル上に動的に置く)
+function ensureProgressEl(panelSel) {
+  const panel = $(panelSel);
+  let el = panel.parentElement.querySelector(".gen-progress-line");
+  if (!el) {
+    el = document.createElement("p");
+    el.className = "form-hint gen-progress-line";
+    panel.parentElement.insertBefore(el, panel);
+  }
+  return el;
+}
+
+$("#edit-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const form = ev.target;
-  const errEl = $("#gen-error");
+  const errEl = $("#edit-error");
   clearError(errEl);
-  const mode = GEN_MODES[$("#gen-mode-select").value];
-  const stopProg = startProgressPolling($("#gen-progress"));
+  const kind = editModelKind();
+  const model = $("#edit-model-select").value;
+  const gguf = model.endsWith("-gguf");
+  const files = Array.from(form.images.files).filter((f) => f.size);
+  const stopProg = startProgressPolling(ensureProgressEl("#edit-result-panel"));
   const btn = form.querySelector(".primary-btn");
   btn.disabled = true;
   try {
     let resp;
     const prompt = form.prompt.value;
     const neg = form.negative_prompt.value;
-    const steps = form.steps.value, cfg = form.cfg.value, seed = form.seed.value;
-    const width = form.width.value, height = form.height.value;
-    const strength = form.strength.value;
-    const lightning = form.lightning.checked;
-    const files = form.images ? Array.from(form.images.files) : [];
-
-    if (mode.api === "t2i") {
-      const body = {
-        prompt, negative_prompt: neg,
-        width: Number(width) || 1328, height: Number(height) || 1328,
-        steps: Number(steps), cfg: Number(cfg), seed: Number(seed),
-        lightning, model: mode.model, quant: mode.quant,
-      };
-      resp = await fetch("/api/t2i", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-    } else if (mode.api === "i2i") {
-      if (!files.length) throw new Error("I2I は参照画像が1枚必要です");
-      const fd = new FormData();
-      fd.append("image", files[0]);
-      fd.append("prompt", prompt);
-      fd.append("negative_prompt", neg);
-      fd.append("strength", strength || "0.6");
-      fd.append("steps", steps); fd.append("cfg", cfg); fd.append("seed", seed);
-      fd.append("lightning", lightning ? "true" : "false");
-      if (mode.model) fd.append("model", mode.model);
-      fd.append("quant", mode.quant);
-      resp = await fetch("/api/i2i", { method: "POST", body: fd });
-    } else if (mode.api === "joyai") {
-      if (!files.length) throw new Error("JoyAI は参照画像が1〜3枚必要です");
+    if (kind === "joyai") {
+      if (!files.length) throw new Error("JoyAI-Edit-Plus は参照画像が1〜3枚必要です");
       const fd = new FormData();
       files.forEach((f) => fd.append("images", f));
       fd.append("prompt", prompt);
       fd.append("negative_prompt", neg);
-      fd.append("seed", seed);
-      if (width) fd.append("width", width);
-      if (height) fd.append("height", height);
-      fd.append("quant", mode.quant);
+      fd.append("steps", form.joyai_steps.value);
+      fd.append("guidance_scale", form.joyai_guidance_scale.value);
+      fd.append("seed", form.joyai_seed.value);
+      if (form.joyai_width.value) fd.append("width", form.joyai_width.value);
+      if (form.joyai_height.value) fd.append("height", form.joyai_height.value);
+      if (gguf) fd.append("quant", "gguf-q4_k_m");
       resp = await fetch("/api/joyai/edit", { method: "POST", body: fd });
+    } else if (kind === "qwen2512") {
+      const quant = gguf ? "gguf-q4_k_m" : "fp8-lightning";
+      if (files.length === 0) {
+        resp = await fetch("/api/t2i", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt, negative_prompt: neg,
+            width: Number(form.qwen2512_width.value) || 1024,
+            height: Number(form.qwen2512_height.value) || 1024,
+            steps: Number(form.qwen2512_steps.value),
+            cfg: Number(form.qwen2512_cfg.value),
+            seed: Number(form.qwen2512_seed.value),
+            lightning: form.qwen2512_lightning.checked,
+            model: "2512", quant,
+          }),
+        });
+      } else {
+        const fd = new FormData();
+        fd.append("image", files[0]);
+        fd.append("prompt", prompt);
+        fd.append("negative_prompt", neg);
+        fd.append("strength", form.qwen2512_strength.value || "0.6");
+        fd.append("steps", form.qwen2512_steps.value);
+        fd.append("cfg", form.qwen2512_cfg.value);
+        fd.append("seed", form.qwen2512_seed.value);
+        fd.append("lightning", form.qwen2512_lightning.checked ? "true" : "false");
+        fd.append("model", "2512");
+        fd.append("quant", quant);
+        resp = await fetch("/api/i2i", { method: "POST", body: fd });
+      }
     } else {
-      // edit(0〜3枚、strength 任意)
+      // Qwen-Image-Edit-2511(通常Edit / strength指定でI2Iモード)
       const fd = new FormData();
       files.forEach((f) => fd.append("images", f));
       fd.append("prompt", prompt);
       fd.append("negative_prompt", neg);
-      fd.append("steps", steps); fd.append("cfg", cfg); fd.append("seed", seed);
-      fd.append("lightning", lightning ? "true" : "false");
-      if (width) fd.append("width", width);
-      if (height) fd.append("height", height);
-      if (strength) fd.append("strength", strength);
-      fd.append("quant", mode.quant);
+      fd.append("steps", form.steps.value);
+      fd.append("cfg", form.cfg.value);
+      fd.append("seed", form.seed.value);
+      if (form.shift.value) fd.append("shift", form.shift.value);
+      if (form.width.value) fd.append("width", form.width.value);
+      if (form.height.value) fd.append("height", form.height.value);
+      if (form.strength.value) fd.append("strength", form.strength.value);
+      fd.append("lightning", form.lightning.checked ? "true" : "false");
+      if (gguf) fd.append("quant", "gguf-q4_k_m");
       resp = await fetch("/api/edit", { method: "POST", body: fd });
     }
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || resp.statusText);
-    showResult($("#gen-result-panel"), data);
+    showResult($("#edit-result-panel"), data);
   } catch (e) {
     showError(errEl, String(e.message || e));
   } finally {
@@ -196,37 +212,157 @@ $("#gen-form").addEventListener("submit", async (ev) => {
   }
 });
 
-// LLM プロンプト支援
-async function llmCall(path) {
-  const form = $("#gen-form");
-  const text = form.prompt.value.trim();
-  if (!text) return;
-  try {
-    const r = await fetch(path, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || r.statusText);
-    form.prompt.value = d.result;
-  } catch (e) {
-    showError($("#gen-error"), "LLM: " + String(e.message || e));
-  }
-}
-$("#llm-enhance-btn").addEventListener("click", () => llmCall("/api/prompt/enhance"));
-$("#llm-translate-btn").addEventListener("click", () => llmCall("/api/prompt/translate"));
+// ---------------- LLM プロンプト支援(全フォーム共通、フォーム毎のUndo付き) ----------------
+$$(".gen-form").forEach((form) => {
+  const prompt = form.querySelector('textarea[name="prompt"]');
+  const undoBtn = form.querySelector(".llm-undo-btn");
+  if (!prompt) return;
+  let prev = null;
+  const call = async (path, btn) => {
+    const text = prompt.value.trim();
+    if (!text) return;
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = "処理中…";
+    try {
+      const r = await fetch(path, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || r.statusText);
+      prev = prompt.value;
+      prompt.value = d.result;
+      if (undoBtn) undoBtn.classList.remove("hidden");
+    } catch (e) {
+      const errEl = form.parentElement.querySelector(".form-error");
+      if (errEl) showError(errEl, "LLM: " + String(e.message || e));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+  };
+  form.querySelectorAll(".llm-enhance-btn").forEach((b) =>
+    b.addEventListener("click", () => call("/api/prompt/enhance", b)));
+  form.querySelectorAll(".llm-translate-btn").forEach((b) =>
+    b.addEventListener("click", () => call("/api/prompt/translate", b)));
+  if (undoBtn) undoBtn.addEventListener("click", () => {
+    if (prev != null) {
+      prompt.value = prev;
+      prev = null;
+      undoBtn.classList.add("hidden");
+    }
+  });
+});
 
-// ---------------- Inpaint タブ ----------------
+// ---------------- Inpaint タブ(マスクエディタ + 送信) ----------------
+const inpaintMask = { active: false, mode: "brush", drawing: false, dirty: false };
+
+function inpaintSetupCanvases(img) {
+  const base = $("#inpaint-base-canvas");
+  const mask = $("#inpaint-mask-canvas");
+  base.width = mask.width = img.naturalWidth;
+  base.height = mask.height = img.naturalHeight;
+  base.getContext("2d").drawImage(img, 0, 0);
+  mask.getContext("2d").clearRect(0, 0, mask.width, mask.height);
+  inpaintMask.dirty = false;
+  $("#inpaint-mask-editor").classList.remove("hidden");
+}
+
+$("#inpaint-image-input").addEventListener("change", () => {
+  const f = $("#inpaint-image-input").files[0];
+  if (!f) return;
+  const img = new Image();
+  img.onload = () => inpaintSetupCanvases(img);
+  img.src = URL.createObjectURL(f);
+});
+
+(() => {
+  const mask = $("#inpaint-mask-canvas");
+  const pos = (e) => {
+    const r = mask.getBoundingClientRect();
+    return {
+      x: (e.clientX - r.left) * (mask.width / r.width),
+      y: (e.clientY - r.top) * (mask.height / r.height),
+    };
+  };
+  const draw = (e) => {
+    const ctx = mask.getContext("2d");
+    const { x, y } = pos(e);
+    const size = Number($("#mask-brush-size").value);
+    ctx.globalCompositeOperation =
+      inpaintMask.mode === "brush" ? "source-over" : "destination-out";
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    ctx.beginPath();
+    ctx.arc(x, y, size * (mask.width / mask.getBoundingClientRect().width) / 2, 0, Math.PI * 2);
+    ctx.fill();
+    inpaintMask.dirty = true;
+  };
+  mask.addEventListener("pointerdown", (e) => {
+    inpaintMask.drawing = true;
+    mask.setPointerCapture(e.pointerId);
+    draw(e);
+  });
+  mask.addEventListener("pointermove", (e) => { if (inpaintMask.drawing) draw(e); });
+  ["pointerup", "pointercancel"].forEach((ev) =>
+    mask.addEventListener(ev, () => { inpaintMask.drawing = false; }));
+  $("#mask-mode-brush").addEventListener("click", () => {
+    inpaintMask.mode = "brush";
+    $("#mask-mode-brush").classList.add("active-tool");
+    $("#mask-mode-eraser").classList.remove("active-tool");
+  });
+  $("#mask-mode-eraser").addEventListener("click", () => {
+    inpaintMask.mode = "eraser";
+    $("#mask-mode-eraser").classList.add("active-tool");
+    $("#mask-mode-brush").classList.remove("active-tool");
+  });
+  $("#mask-clear-btn").addEventListener("click", () => {
+    mask.getContext("2d").clearRect(0, 0, mask.width, mask.height);
+    inpaintMask.dirty = false;
+  });
+})();
+
+// マスクキャンバス(透明+白)を黒背景の白黒マスクPNGにして返す
+function inpaintMaskBlob() {
+  return new Promise((resolve) => {
+    const mask = $("#inpaint-mask-canvas");
+    const out = document.createElement("canvas");
+    out.width = mask.width;
+    out.height = mask.height;
+    const ctx = out.getContext("2d");
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, out.width, out.height);
+    ctx.drawImage(mask, 0, 0);
+    out.toBlob(resolve, "image/png");
+  });
+}
+
 $("#inpaint-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const form = ev.target;
   const errEl = $("#inpaint-error");
   clearError(errEl);
-  const stopProg = startProgressPolling($("#inpaint-progress"));
+  const stopProg = startProgressPolling(ensureProgressEl("#inpaint-result-panel"));
   const btn = form.querySelector(".primary-btn");
   btn.disabled = true;
   try {
-    const fd = new FormData(form);
+    const imgFile = form.image.files[0];
+    if (!imgFile) throw new Error("元画像を選択してください");
+    const uploaded = $("#inpaint-mask-upload").files[0];
+    let maskBlob = uploaded;
+    if (!maskBlob) {
+      if (!inpaintMask.dirty) throw new Error("マスクを描くか、マスク画像をアップロードしてください");
+      maskBlob = await inpaintMaskBlob();
+    }
+    const fd = new FormData();
+    fd.append("image", imgFile);
+    fd.append("mask_image", maskBlob, "mask.png");
+    fd.append("prompt", form.prompt.value);
+    fd.append("negative_prompt", form.negative_prompt.value);
+    fd.append("controlnet_conditioning_scale", form.controlnet_conditioning_scale.value);
+    fd.append("steps", form.steps.value);
+    fd.append("cfg", form.cfg.value);
+    fd.append("seed", form.seed.value);
     const resp = await fetch("/api/inpaint", { method: "POST", body: fd });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || resp.statusText);
@@ -241,12 +377,21 @@ $("#inpaint-form").addEventListener("submit", async (ev) => {
 });
 
 // ---------------- アウトペイント タブ ----------------
+$("#outpaint-form").querySelector('input[name="image"]').addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  const prev = $("#outpaint-preview");
+  if (f) {
+    prev.src = URL.createObjectURL(f);
+    prev.classList.remove("hidden");
+  }
+});
+
 $("#outpaint-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const form = ev.target;
   const errEl = $("#outpaint-error");
   clearError(errEl);
-  const stopProg = startProgressPolling($("#outpaint-progress"));
+  const stopProg = startProgressPolling(ensureProgressEl("#outpaint-result-panel"));
   const btn = form.querySelector(".primary-btn");
   btn.disabled = true;
   try {
@@ -267,152 +412,317 @@ $("#outpaint-form").addEventListener("submit", async (ev) => {
 // ---------------- キャラシート タブ ----------------
 let csJobId = null;
 let csPollTimer = null;
+let csFile = null;            // 選択済みファイル(File)
+let csSplitRef = null;        // {split_id, figure_index} を使う場合
+const csRendered = new Set(); // "key:url" 描画済み管理
 
-function csRenderJob(job) {
-  const panel = $("#cs-result-panel");
-  if (!panel.dataset.jobId || panel.dataset.jobId !== job.job_id) {
-    panel.innerHTML = "";
-    panel.dataset.jobId = job.job_id;
-    const grid = document.createElement("div");
-    grid.style.display = "grid";
-    grid.style.gridTemplateColumns = "repeat(4, 1fr)";
-    grid.style.gap = "6px";
-    grid.id = "cs-grid";
-    panel.appendChild(grid);
-  }
-  const grid = $("#cs-grid");
-  (job.views || []).forEach((v) => {
-    let tile = grid.querySelector(`[data-key="${v.key}"]`);
-    if (!tile) {
-      tile = document.createElement("div");
-      tile.dataset.key = v.key;
-      tile.dataset.rendered = "";
-      const cap = document.createElement("div");
-      cap.className = "form-hint";
-      cap.textContent = v.label_ja;
-      const img = document.createElement("img");
-      img.style.width = "100%";
-      img.style.display = "none";
-      tile.appendChild(cap);
-      tile.appendChild(img);
-      grid.appendChild(tile);
+function csShowError(msg) {
+  const el = $("#cs-error-message");
+  el.textContent = msg || "";
+  el.classList.toggle("hidden", !msg);
+}
+
+function csShowStatus(msg) {
+  const el = $("#cs-status-message");
+  el.textContent = msg || "";
+  el.classList.toggle("hidden", !msg);
+}
+
+function csSetInput(file) {
+  csFile = file;
+  csSplitRef = null;
+  $("#cs-preview-image").src = URL.createObjectURL(file);
+  $("#cs-preview-image").classList.remove("hidden");
+  $("#cs-dropzone-text").innerHTML = file.name;
+  $("#cs-generate-btn").disabled = false;
+  csShowError("");
+  csDetectSplit(file);
+}
+
+// 複数キャラ検出(失敗しても全体を使えばよいので握りつぶす)
+async function csDetectSplit(file) {
+  const section = $("#cs-split-section");
+  section.classList.add("hidden");
+  $("#cs-split-grid").innerHTML = "";
+  try {
+    const fd = new FormData();
+    fd.append("image", file);
+    const r = await fetch("/api/charsheet/split", { method: "POST", body: fd });
+    if (!r.ok) return;
+    const d = await r.json();
+    if (!d.figures || d.count < 2) return;
+    $("#cs-split-message").textContent =
+      `${d.count} 体のキャラクターを検出しました。使う1体を選択してください。`;
+    d.figures.forEach((fig) => {
+      const cell = document.createElement("div");
+      cell.className = "split-cell";
+      cell.innerHTML = `<span class="split-cell-num">${fig.index + 1}</span><img src="${fig.url}">`;
+      cell.addEventListener("click", () => {
+        csSplitRef = { split_id: d.split_id, figure_index: fig.index };
+        $("#cs-split-grid").querySelectorAll(".split-cell").forEach((el) =>
+          el.classList.toggle("selected", el === cell));
+        $("#cs-preview-image").src = fig.url;
+      });
+      $("#cs-split-grid").appendChild(cell);
+    });
+    section.classList.remove("hidden");
+  } catch (e) { /* 検出失敗は無視して全体を使う */ }
+}
+
+$("#cs-use-whole-link").addEventListener("click", (e) => {
+  e.preventDefault();
+  csSplitRef = null;
+  $("#cs-split-grid").querySelectorAll("img").forEach((el) => el.classList.remove("selected"));
+  if (csFile) $("#cs-preview-image").src = URL.createObjectURL(csFile);
+});
+
+// --- 入力: クリック選択 + D&D(URL/file:///MIME空対応) ---
+$("#cs-dropzone").addEventListener("click", () => $("#cs-file-input").click());
+$("#cs-file-input").addEventListener("change", () => {
+  const f = $("#cs-file-input").files[0];
+  if (f) csSetInput(f);
+});
+
+// 枠外ドロップでのページ遷移を防止(ページ全体)
+["dragover", "drop"].forEach((ev) =>
+  window.addEventListener(ev, (e) => e.preventDefault())
+);
+
+(() => {
+  const zone = $("#cs-dropzone");
+  ["dragenter", "dragover"].forEach((ev) =>
+    zone.addEventListener(ev, (e) => {
+      e.preventDefault();
+      zone.classList.add("dragover");
+    })
+  );
+  ["dragleave", "drop"].forEach((ev) =>
+    zone.addEventListener(ev, (e) => {
+      e.preventDefault();
+      zone.classList.remove("dragover");
+    })
+  );
+  zone.addEventListener("drop", async (e) => {
+    const isImage = (f) => f.type.startsWith("image/") ||
+      (!f.type && /\.(png|jpe?g|webp|gif|bmp)$/i.test(f.name));
+    const f = [...(e.dataTransfer?.files || [])].find(isImage);
+    if (f) return csSetInput(f);
+    const url = (e.dataTransfer?.getData("text/uri-list") ||
+                 e.dataTransfer?.getData("text/plain") || "").split("\n")[0].trim();
+    if (!url) {
+      csShowError("ドロップから画像を取り出せませんでした。クリックで選択してください。");
+      return;
     }
-    const img = tile.querySelector("img");
-    const cap = tile.querySelector("div");
-    cap.textContent = `${v.label_ja}(${v.status})`;
-    if (v.url && v.status === "done" && tile.dataset.rendered !== v.url + job.status) {
-      img.src = v.url + "?t=" + Date.now();
-      img.style.display = "block";
-      tile.dataset.rendered = v.url + job.status;
+    csShowStatus("画像を取得中…");
+    try {
+      let resp = null;
+      if (!url.startsWith("file:")) {
+        try {
+          resp = await fetch(url, { mode: "cors" });
+          if (!resp.ok) throw new Error(resp.status);
+        } catch (_) { resp = null; }
+      }
+      if (!resp) {
+        resp = await fetch(`/api/fetch-image?url=${encodeURIComponent(url)}`);
+        if (!resp.ok) {
+          const detail = (await resp.json().catch(() => null))?.detail;
+          throw new Error(detail || resp.status);
+        }
+      }
+      const blob = await resp.blob();
+      if (!blob.type.startsWith("image/")) throw new Error("画像ではありません");
+      const name = url.startsWith("data:") ? "dropped.png"
+        : (decodeURIComponent(url.split("/").pop().split("?")[0]) || "dropped.png");
+      csSetInput(new File([blob], name, { type: blob.type }));
+      csShowStatus("");
+    } catch (err) {
+      csShowStatus("");
+      csShowError(`取り込めませんでした(${err.message})。クリックで選択してください。`);
     }
   });
-  $("#cs-progress").textContent =
-    `状態: ${job.status} (${job.progress}/${job.total})` + (job.error ? ` エラー: ${job.error}` : "");
-  if (job.zip_url) {
-    const a = $("#cs-zip-link");
-    a.href = job.zip_url;
-    a.classList.remove("hidden");
-  }
-  if (job.status === "done" || job.status === "error") {
-    $("#cs-actions").classList.remove("hidden");
-    const sel = $("#cs-refine-key");
-    if (!sel.options.length) {
-      (job.views || []).forEach((v) => {
-        const o = document.createElement("option");
-        o.value = v.key;
-        o.textContent = v.label_ja;
-        sel.appendChild(o);
-      });
+})();
+
+// --- 生成とポーリング ---
+$("#cs-generate-btn").addEventListener("click", async () => {
+  if (!csFile && !csSplitRef) return;
+  csShowError("");
+  $("#cs-generate-btn").disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append("seed", $("#cs-seed-input").value || "0");
+    if (csSplitRef) {
+      fd.append("split_id", csSplitRef.split_id);
+      fd.append("figure_index", String(csSplitRef.figure_index));
+    } else {
+      fd.append("image", csFile);
     }
+    const resp = await fetch("/api/charsheet/generate", { method: "POST", body: fd });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.statusText);
+    csOpenJob(data.job_id);
+  } catch (e) {
+    csShowError(String(e.message || e));
+    $("#cs-generate-btn").disabled = false;
   }
+});
+
+function csOpenJob(jobId) {
+  csJobId = jobId;
+  csRendered.clear();
+  $("#cs-views-grid").innerHTML = "";
+  $("#cs-sheet-panel").classList.add("hidden");
+  csStartPolling();
 }
 
 function csStartPolling() {
   if (csPollTimer) clearInterval(csPollTimer);
-  csPollTimer = setInterval(async () => {
-    if (!csJobId) return;
-    try {
-      const r = await fetch(`/api/charsheet/jobs/${csJobId}`);
-      if (!r.ok) return;
-      const job = await r.json();
-      csRenderJob(job);
-      if (job.status === "done" || job.status === "error") {
-        clearInterval(csPollTimer);
-        csPollTimer = null;
-      }
-    } catch (e) { /* ignore */ }
-  }, 1500);
+  csPoll();
+  csPollTimer = setInterval(csPoll, 1500);
 }
 
-$("#cs-form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const form = ev.target;
-  const errEl = $("#cs-error");
-  clearError(errEl);
-  const btn = form.querySelector(".primary-btn");
-  btn.disabled = true;
-  try {
-    const fd = new FormData(form);
-    const resp = await fetch("/api/charsheet/generate", { method: "POST", body: fd });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.detail || resp.statusText);
-    csJobId = data.job_id;
-    $("#cs-result-panel").dataset.jobId = "";
-    csStartPolling();
-  } catch (e) {
-    showError(errEl, String(e.message || e));
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-$("#cs-refine-btn").addEventListener("click", async () => {
+async function csPoll() {
   if (!csJobId) return;
-  const key = $("#cs-refine-key").value;
-  const instruction = $("#cs-refine-instruction").value.trim();
-  if (!instruction) return showError($("#cs-error"), "修正指示を入力してください");
-  clearError($("#cs-error"));
+  let job;
   try {
-    const r = await fetch(`/api/charsheet/jobs/${csJobId}/refine`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key, instruction, seed: 0 }),
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || r.statusText);
-    csStartPolling();
-  } catch (e) {
-    showError($("#cs-error"), String(e.message || e));
+    const r = await fetch(`/api/charsheet/jobs/${csJobId}`);
+    if (!r.ok) return;
+    job = await r.json();
+  } catch (e) { return; }
+  csRenderJob(job);
+  if (job.status === "done" || job.status === "error") {
+    clearInterval(csPollTimer);
+    csPollTimer = null;
+    $("#cs-generate-btn").disabled = !(csFile || csSplitRef);
+    csRefreshGallery();
   }
-});
+}
 
-$("#cs-undo-btn").addEventListener("click", async () => {
-  if (!csJobId) return;
-  const key = $("#cs-refine-key").value;
-  try {
-    const r = await fetch(`/api/charsheet/jobs/${csJobId}/undo`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key }),
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || r.statusText);
-    csRenderJob(d);
-    $("#cs-result-panel").dataset.jobId = "";
-  } catch (e) {
-    showError($("#cs-error"), String(e.message || e));
+const CS_STATUS_JA = {
+  queued: "待機", running: "生成中", done: "完了", error: "失敗",
+  refining: "修正中", removing_bg: "背景削除中",
+};
+
+function csRenderJob(job) {
+  const grid = $("#cs-views-grid");
+  (job.views || []).forEach((v) => {
+    let tile = grid.querySelector(`[data-key="${v.key}"]`);
+    if (!tile) {
+      tile = document.createElement("div");
+      tile.className = "view-tile";
+      tile.dataset.key = v.key;
+      tile.innerHTML =
+        `<div class="view-tile-image-wrap"><img alt="">` +
+        `<span class="view-tile-status"></span></div>` +
+        `<div class="view-tile-label"><span class="ja">${v.label_ja}</span>` +
+        (v.label_en ? ` <span class="en">${v.label_en}</span>` : "") + `</div>` +
+        `<div class="view-tile-actions">` +
+        `<button class="tiny-btn secondary view-bg-btn">背景削除</button></div>`;
+      tile.querySelector(".view-bg-btn").addEventListener("click", () => csRemoveBg(v.key));
+      grid.appendChild(tile);
+    }
+    tile.querySelector(".view-tile-status").textContent = CS_STATUS_JA[v.status] || v.status;
+    const img = tile.querySelector("img");
+    const mark = `${v.key}:${v.url}:${job.status}`;
+    if (v.url && v.status === "done" && !csRendered.has(mark)) {
+      csRendered.add(mark);
+      img.src = v.url + "?t=" + Date.now();
+      img.style.display = "block";
+    }
+  });
+
+  // 進捗
+  const wrap = $("#cs-overall-progress");
+  const running = !(job.status === "done" || job.status === "error");
+  wrap.classList.toggle("hidden", !running);
+  if (running && job.total) {
+    $("#cs-overall-progress-count").textContent = `${job.progress}/${job.total}`;
+    $("#cs-overall-progress-fill").style.width =
+      `${Math.round((job.progress / job.total) * 100)}%`;
   }
-});
+  csShowStatus(
+    running
+      ? `状態: ${CS_STATUS_JA[job.status] || job.status} (${job.progress}/${job.total})`
+      : (job.error ? `エラー: ${job.error}` : (job.refine_error ? `一部失敗: ${job.refine_error}` : "完了"))
+  );
 
-$("#cs-removebg-btn").addEventListener("click", async () => {
+  // シート + ダウンロード
+  if (job.sheet_url) {
+    $("#cs-sheet-image").src = job.sheet_url + "?t=" + (job.status === "done" ? Date.now() : "");
+    $("#cs-sheet-panel").classList.remove("hidden");
+  }
+}
+
+function csDownload(url, filename) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename || "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+$("#cs-download-zip-btn").addEventListener("click", () => {
+  if (csJobId) csDownload(`/api/charsheet/jobs/${csJobId}/download.zip`, `character_sheet_${csJobId}.zip`);
+});
+$("#cs-download-sheet-btn").addEventListener("click", () => {
+  if (csJobId) csDownload(`/api/charsheet/jobs/${csJobId}/sheet.png`, `character_sheet_${csJobId}.png`);
+});
+$("#cs-remove-bg-all-btn").addEventListener("click", () => csRemoveBg("all"));
+
+async function csRemoveBg(key) {
   if (!csJobId) return;
+  csShowError("");
   try {
     const r = await fetch(`/api/charsheet/jobs/${csJobId}/remove_bg`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: "all", method: "anime" }),
+      body: JSON.stringify({ key, method: $("#cs-bgmethod-input").value }),
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.detail || r.statusText);
+    csRendered.clear(); // 画像が変わるので再描画させる
     csStartPolling();
   } catch (e) {
-    showError($("#cs-error"), String(e.message || e));
+    csShowError(String(e.message || e));
   }
+}
+
+// ---------------- ギャラリー(キャラシート履歴) ----------------
+async function csRefreshGallery() {
+  try {
+    const r = await fetch("/api/charsheet/jobs");
+    if (!r.ok) return;
+    const d = await r.json();
+    const jobs = d.jobs || [];
+    $("#gallery-count").textContent = `${jobs.length} 件`;
+    const grid = $("#gallery-grid");
+    grid.innerHTML = "";
+    jobs.forEach((j) => {
+      const card = document.createElement("div");
+      card.className = "gallery-card";
+      const when = new Date(j.mtime * 1000).toLocaleString("ja-JP");
+      card.innerHTML =
+        `<div class="gallery-card-image-wrap"><img src="${j.thumb_url}" alt="">` +
+        (j.zip_url ? `<button class="tiny-btn gallery-card-download-btn">ZIP</button>` : "") +
+        `</div><div class="form-hint">${when}</div>`;
+      card.querySelector("img").addEventListener("click", () => {
+        csOpenJob(j.job_id);
+        document.querySelector('.tab-btn[data-tab="charsheet"]')?.click();
+        $("#cs-views-panel").scrollIntoView({ behavior: "smooth" });
+      });
+      const dl = card.querySelector(".gallery-card-download-btn");
+      if (dl) dl.addEventListener("click", (e) => {
+        e.stopPropagation();
+        csDownload(j.zip_url, `character_sheet_${j.job_id}.zip`);
+      });
+      grid.appendChild(card);
+    });
+  } catch (e) { /* ギャラリーは補助機能なので失敗は無視 */ }
+}
+
+$("#gallery-clear-btn").addEventListener("click", () => {
+  // 表示のみクリア(ファイルは削除しない)。再読込で戻る。
+  $("#gallery-grid").innerHTML = "";
+  $("#gallery-count").textContent = "0 件(表示をクリア)";
 });
+
+csRefreshGallery();

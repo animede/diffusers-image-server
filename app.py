@@ -513,6 +513,44 @@ def unload(req: UnloadRequest):
     return result
 
 
+@app.get("/api/fetch-image")
+async def fetch_image(url: str):
+    """D&D画像URLの取り込み(他タブのローカルURL・file:// のみ。CORS回避プロキシ)。"""
+    from urllib.parse import unquote, urlparse
+
+    from fastapi.responses import Response
+
+    parsed = urlparse(url)
+    if parsed.scheme == "file":
+        path = unquote(parsed.path)
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail=f"ファイルが見つかりません: {path}")
+        try:
+            with Image.open(path) as im:
+                fmt = (im.format or "png").lower()
+        except Exception:
+            raise HTTPException(status_code=415, detail="画像ではありません")
+        with open(path, "rb") as f:
+            return Response(content=f.read(),
+                            media_type=f"image/{'jpeg' if fmt == 'jpeg' else fmt}")
+    if parsed.scheme not in ("http", "https") or parsed.hostname not in (
+        "localhost", "127.0.0.1", "::1",
+    ):
+        raise HTTPException(status_code=400, detail="ローカルのURLのみ取得できます")
+    import requests
+    from starlette.concurrency import run_in_threadpool
+
+    try:
+        resp = await run_in_threadpool(requests.get, url, timeout=15)
+        resp.raise_for_status()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"画像の取得に失敗しました: {exc}")
+    ctype = resp.headers.get("content-type", "")
+    if not ctype.startswith("image/"):
+        raise HTTPException(status_code=415, detail="画像ではありません")
+    return Response(content=resp.content, media_type=ctype)
+
+
 @app.get("/api/progress")
 def get_progress():
     return progress_mod.snapshot()

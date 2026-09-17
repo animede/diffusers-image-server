@@ -625,6 +625,31 @@ def undo(job_id: str, req: UndoRequest):
         return JSONResponse(dict(jobs[job_id]))
 
 
+@router.get("/jobs")
+async def list_jobs(limit: int = 24):
+    """outputs/charsheet/ にある過去ジョブの一覧(新しい順)。履歴ギャラリー用。"""
+    entries = []
+    if os.path.isdir(OUTPUTS_DIR):
+        for name in os.listdir(OUTPUTS_DIR):
+            if name.startswith("_"):
+                continue
+            job_dir = os.path.join(OUTPUTS_DIR, name)
+            front = os.path.join(job_dir, "front.png")
+            if not os.path.isdir(job_dir) or not os.path.exists(front):
+                continue
+            entries.append({
+                "job_id": name,
+                "mtime": os.path.getmtime(job_dir),
+                "thumb_url": f"/api/charsheet/jobs/{name}/images/front.png",
+                "sheet_url": (f"/api/charsheet/jobs/{name}/sheet.png"
+                              if os.path.exists(os.path.join(job_dir, "sheet.png")) else None),
+                "zip_url": (f"/api/charsheet/jobs/{name}/download.zip"
+                            if os.path.exists(os.path.join(job_dir, "download.zip")) else None),
+            })
+    entries.sort(key=lambda e: e["mtime"], reverse=True)
+    return {"jobs": entries[:limit]}
+
+
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: str):
     job = _get_or_restore_job(job_id)
