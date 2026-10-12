@@ -27,12 +27,14 @@ UI: http://localhost:8620/ (タブ: 画像生成/編集(Edit統合)・Inpaint・
 | `POST /api/t2i` | T2I(model=`2512`(既定)/`qwen-image`、`quant` 切替可) |
 | `POST /api/i2i` | I2I(同上) |
 | `POST /api/joyai/edit` | JoyAI-Image-Edit-Plus(マルチ参照 1〜3枚、`quant` 切替可) |
+| `POST /api/iris/t2i` | Iris-3B Turbo T2I(JSON: prompt / width / height / seed / auto_size。4 steps 固定、negative・cfg なし) |
+| `POST /generate/` | Momo Song v5 互換(multipart form → PNG 本体)。Iris-3B で、要求の縦横比のまま約1MPで生成 |
 | `POST /api/inpaint` | ControlNet Inpainting(image + mask_image、白=再生成領域) |
 | `POST /api/outpaint` | 画角拡張(Inpaint 流用。実行前に全モデル解放するため毎回 ~50s のロードコスト) |
 | `POST /api/remove_bg` | 背景除去(rembg / anime、CPU) |
 | `POST /api/charsheet/generate` ほか `/api/charsheet/*` | キャラシート8方向(ジョブ式。refine/undo/remove_bg/split/sheet/zip) |
 | `POST /api/prompt/enhance` `/api/prompt/translate` | LLMプロンプト支援(`DS_LLM_URL`) |
-| `GET /api/status` `GET /api/progress` `POST /api/unload` | 運用系(unload target: t2i/edit/controlnet/joyai/all) |
+| `GET /api/status` `GET /api/progress` `POST /api/unload` | 運用系(unload target: t2i/edit/controlnet/joyai/iris/all) |
 
 `quant` の値: 未指定/`default`=現状維持、`gguf-q4_k_m` 等、`fp8-lightning`、`none`(bf16)。
 fp8-lightning への切替は空きVRAM < 44GB なら 400 を返す(GGUF を案内)。
@@ -57,6 +59,35 @@ LoRA の transformer-level アダプタ**で8方向を生成する(通常 Edit �
 | JoyAI GGUF Q4_K_M | ピーク ~20.8GB |
 | T2I 2512 fp8-lightning | ピーク ~35GB |
 | Inpaint / アウトペイント(tiled VAE 既定) | ピーク ~39GB(1280×720) |
+| Iris-3B Turbo int8(既定) | 常駐 ~7.2GB / ピーク ~7.8GB(1344×768、約1.0s/枚、RTX PRO 5000) |
+
+## Iris-3B Turbo(T2I)
+
+[Iris-3B](https://huggingface.co/speridlabs/iris-3b)(VAEなしの画素空間DiT 3B、テキストエンコーダ
+Qwen3-VL-4B-Instruct)に [4-step Turbo LoRA](https://huggingface.co/pentacoxian-dev/iris-3b-turbo-lora)
+をロード時にマージして生成する。diffusers のパイプラインではないため、推論コード
+[iris-3b-turbo](https://github.com/pentaCoxian/iris-3b-turbo) のチェックアウトを `sys.path` に足して使う
+(共有 venv へは pip install しない。本 venv の torch 2.9 / transformers 5.1 で動作確認済み)。
+
+```bash
+git clone https://github.com/pentaCoxian/iris-3b-turbo ~/iris-3b-turbo
+```
+
+| 環境変数 | 既定値 | 意味 |
+|---|---|---|
+| `DS_IRIS_CODE_DIR` | `~/iris-3b-turbo` | 推論コードのチェックアウト |
+| `DS_IRIS_CHECKPOINT` | `speridlabs/iris-3b` | HF ID(T2I本体の `model.safetensors` と `config.yaml` だけ取得)またはディレクトリ |
+| `DS_IRIS_LORA` | `pentacoxian-dev/iris-3b-turbo-lora` | Turbo LoRA。`owner/repo[:name]` またはローカル `.safetensors` |
+| `DS_IRIS_QUANT` | `int8` | `int8`(DiT幹+テキストエンコーダを重みint8、常駐 ~7.2GB)/ `none`(bf16、~13GB) |
+
+- **Qwen 系・JoyAI とは同時常駐しない**(排他グループ)。切替時は registry が相手を自動 unload する
+  (Iris の再ロードは約10秒)。
+- UI: 「画像生成/編集」タブのモデル選択で「Iris-3B Turbo」。参照画像・ネガティブプロンプト・steps・cfg は
+  使わない。英語の説明文プロンプトが最もよく効く。
+- **Momo Song v5 から使う**: Momo Song の `.env` を `IMAGE_BACKEND=remote`、
+  `IMAGE_API_URL=http://127.0.0.1:8620`、`IMAGE_ENGINE=iris` にすると、背景画像を本サーバの
+  `POST /generate/` で生成する(896×512 の要求は 1344×768 で返る)。GPU 使用中は他 API と同じく 409 を返し、
+  Momo Song 側は選択中の初期背景を維持する。
 
 ### 20GB級カードでのQ4_K_M model_cpu運用
 
@@ -83,4 +114,4 @@ transformerと共有コンポーネントを使用段階に応じてCPU/GPU間�
 このリポジトリで独自に実装したアプリケーションコードは [Apache License 2.0](LICENSE) で提供します。
 
 > [!IMPORTANT]
-> Apache License 2.0 は Qwen-Image / Qwen-Image-Edit 系モデルの重み、派生 LoRA・チェックポイント、その他の第三者製コンポーネントには適用されません。各モデルのライセンス(Qwen-Image 系は Apache 2.0、fal の Multiple-Angles LoRA は Apache 2.0 等)を個別に確認してください。
+> Apache License 2.0 は Qwen-Image / Qwen-Image-Edit 系モデルの重み、派生 LoRA・チェックポイント、その他の第三者製コンポーネントには適用されません。各モデルのライセンス(Qwen-Image 系は Apache 2.0、fal の Multiple-Angles LoRA は Apache 2.0、Iris-3B・Iris-3B Turbo LoRA・Qwen3-VL-4B-Instruct は Apache 2.0 等)を個別に確認してください。

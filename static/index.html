@@ -44,6 +44,7 @@
               <option value="joyai-edit-plus-gguf">JoyAI-Edit-Plus(GGUF Q4_K_M・軽量、24GB級以下向け)</option>
               <option value="qwen-2512">Qwen-Image-2512(T2I/I2I)</option>
               <option value="qwen-2512-gguf">Qwen-Image-2512(T2I/I2I・GGUF Q4_K_M・軽量)</option>
+              <option value="iris-3b-turbo">Iris-3B Turbo(T2Iのみ・4steps・約8GB)</option>
             </select>
           </label>
           <p class="form-hint">モデル切替時は別モデルの解放 → 再ロードが走るため、数十秒かかることがあります。GGUF版は量子化が軽量なぶん画質はやや劣りますが24GB/20GB級カードでも動作します。</p>
@@ -113,6 +114,17 @@
               <input type="number" name="qwen2512_strength" value="0.6" step="0.05" min="0.05" max="1">
             </label>
           </div>
+          <div class="form-grid iris-only-fields hidden">
+            <label>seed(-1でランダム) <input type="number" name="iris_seed" value="-1" step="1"></label>
+            <label>幅 <input type="number" name="iris_width" value="1344" step="16" min="256" max="2048"></label>
+            <label>高さ <input type="number" name="iris_height" value="768" step="16" min="256" max="2048"></label>
+          </div>
+          <p class="form-hint iris-only-fields hidden">
+            Iris-3B(画素空間DiT、VAEなし)+ 4-step Turbo LoRA。テキストのみから生成します(参照画像・
+            ネガティブプロンプト・steps・cfg は使いません)。プロンプトは英語の説明文が最もよく効きます。
+            Turbo の蒸留解像度は約1MP(1024²、1344×768 など)です。Qwen系とは同時に載らないため、
+            切替時は解放→再ロード(約10秒)が走ります。
+          </p>
           <label class="checkbox-row qwen-2512-only-fields hidden">
             <input type="checkbox" name="qwen2512_lightning" checked>
             Lightning LoRA を使う(4steps・cfg=1.0・shift=3.0に自動調整)

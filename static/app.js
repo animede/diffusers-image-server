@@ -28,6 +28,8 @@ async function refreshStatus() {
     parts.push(`inpaint:${d.controlnet_inpaint_loaded ? "済" : "-"}`);
     const joyai = d.joyai || {};
     parts.push(`joyai:${joyai.loaded ? "済" : "-"}`);
+    const iris = d.iris3b || {};
+    parts.push(`iris:${iris.loaded ? "済" : "-"}`);
     $("#status-text").textContent = parts.join(" | ");
   } catch (e) {
     $("#status-text").textContent = "ステータス取得失敗";
@@ -99,6 +101,7 @@ function showResult(panel, meta) {
 function editModelKind() {
   const v = $("#edit-model-select").value;
   if (v.startsWith("joyai")) return "joyai";
+  if (v.startsWith("iris")) return "iris";
   if (v.startsWith("qwen-2512")) return "qwen2512";
   return "qwenedit";
 }
@@ -108,6 +111,9 @@ function updateEditFields() {
   $$(".qwen-edit-only-fields").forEach((el) => el.classList.toggle("hidden", kind !== "qwenedit"));
   $$(".joyai-only-fields").forEach((el) => el.classList.toggle("hidden", kind !== "joyai"));
   $$(".qwen-2512-only-fields").forEach((el) => el.classList.toggle("hidden", kind !== "qwen2512"));
+  $$(".iris-only-fields").forEach((el) => el.classList.toggle("hidden", kind !== "iris"));
+  // Iris Turbo は CFG を焼き込み済みでネガティブプロンプトを使わない
+  $("#edit-form").negative_prompt.closest("label").classList.toggle("hidden", kind === "iris");
 }
 $("#edit-model-select").addEventListener("change", updateEditFields);
 updateEditFields();
@@ -153,6 +159,17 @@ $("#edit-form").addEventListener("submit", async (ev) => {
       if (form.joyai_height.value) fd.append("height", form.joyai_height.value);
       if (gguf) fd.append("quant", "gguf-q4_k_m");
       resp = await fetch("/api/joyai/edit", { method: "POST", body: fd });
+    } else if (kind === "iris") {
+      if (files.length) throw new Error("Iris-3B Turbo はテキストのみ生成です(参照画像を外してください)");
+      resp = await fetch("/api/iris/t2i", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          width: Number(form.iris_width.value) || 1344,
+          height: Number(form.iris_height.value) || 768,
+          seed: Number(form.iris_seed.value),
+        }),
+      });
     } else if (kind === "qwen2512") {
       const quant = gguf ? "gguf-q4_k_m" : "fp8-lightning";
       if (files.length === 0) {

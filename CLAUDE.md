@@ -32,7 +32,8 @@ diffusers-server 側には存在しないので混ぜないこと。
 ## 機能スコープ
 
 含む: Edit-2511(指示編集/テキストのみ生成/strength I2I)、T2I/I2I(2512・無印)、
-JoyAI-Edit-Plus(マルチ参照)、ControlNet Inpainting、アウトペイント、
+JoyAI-Edit-Plus(マルチ参照)、Iris-3B Turbo T2I(+ Momo Song 互換 `/generate/`)、
+ControlNet Inpainting、アウトペイント、
 キャラクターシート(新方式、下記)、LLMプロンプト支援、背景除去。
 いずれもリクエスト単位 quant 切替(bf16/fp8-lightning ⇔ GGUF、元 CLAUDE.md 69番)+
 fp8-lightning への切替時 VRAM ガード(空き < 44GB なら 400)対応。
@@ -72,6 +73,18 @@ diffusers-server 本体の `DS_CHARSHEET_METHOD` 4方式(bf16-group 等)は移�
 6. プロンプトは構造化タグ `<sks> [azimuth] eye-level shot medium shot`
    (`apps/charsheet/prompts.py` VIEWS_LORA_2511、元 67番)。
 
+## 本リポジトリ独自の設計: Iris-3B ファミリー
+
+`families/iris3b/` は diffusers-server に存在しない独自ファミリー(二重管理の対象外)。
+
+- diffusers 非対応のため推論コード iris3b(pentaCoxian/iris-3b-turbo)を `DS_IRIS_CODE_DIR/src` から
+  import する。**venv へ pip install しない**(推論に要る torch / transformers / omegaconf は comfy-env にある)。
+- `registry.register(family, exclusive_with=["qwen_image", "joyai"])`。48GB の GPU1 では Qwen Inpaint
+  ~39GB と Iris ~7.8GB を同居させない。
+- `generate_turbo` はステップ callback を持たないため、進捗は `start_generating(mode, 0)`(不確定表示)。
+- `POST /generate/` は Momo Song v5 の remote 画像プロトコル(multipart → PNG 本体)。`auto_size=True` で
+  要求の縦横比のまま約1MPにする(Turbo の蒸留解像度)。
+
 ## 元リポジトリから引き継ぐ主要な罠(要点のみ、詳細は元 CLAUDE.md の番号)
 
 - **registry.load() 経由でないと排他 unload が効かない**(1番)。新しい呼び出し経路は
@@ -97,12 +110,13 @@ diffusers-server 本体の `DS_CHARSHEET_METHOD` 4方式(bf16-group 等)は移�
 ```
 diffusers-image-server/
 ├── app.py                # FastAPI(port 8620。/api/edit /api/t2i /api/i2i
-│                         #   /api/joyai/edit /api/inpaint /api/outpaint /api/remove_bg
+│                         #   /api/joyai/edit /api/iris/t2i /generate/ /api/inpaint /api/outpaint /api/remove_bg
 │                         #   /api/charsheet/* /api/status /api/unload /api/progress /api/prompt/*)
 ├── core/                 # diffusers-server からコピー(無変更)
 ├── families/
 │   ├── qwen_image/       # 刈り込み版(layered/edit_angles 系削除、angles adapter 追加)
-│   └── joyai/            # コピー(無変更)
+│   ├── joyai/            # コピー(無変更)
+│   └── iris3b/           # 本リポジトリ独自(diffusers-server には無い。二重管理対象外)
 ├── apps/
 │   ├── charsheet/        # ジョブ機構はコピー、generate.py のみ新方式に差し替え
 │   └── outpaint.py       # コピー(無変更)

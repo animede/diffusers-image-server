@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 import families.qwen_image as qwen_image  # noqa: F401  (import 副作用で registry に登録)
 import families.joyai as joyai  # noqa: F401  (import 副作用で registry に登録)
+import families.iris3b as iris3b  # noqa: F401  (import 副作用で registry に登録)
 from apps.charsheet import router as charsheet_router
 from core import bg as bg_mod
 from core import gpu
@@ -56,8 +57,9 @@ _MODE_TO_FAMILY = {
     "edit": "qwen_image",
     "inpaint": "qwen_image",
     "joyai_edit": "joyai",
+    "iris_t2i": "iris3b",
 }
-_JOYAI_MODE_ALIAS = {"joyai_edit": "edit"}
+_JOYAI_MODE_ALIAS = {"joyai_edit": "edit", "iris_t2i": "t2i"}
 
 
 def _record_last_generation(meta: dict) -> None:
@@ -474,10 +476,64 @@ async def generate_joyai_edit(
 
 
 # ============================================================================
+# Iris-3B T2I(4-step Turbo、negative/cfg なし)
+# ============================================================================
+class IrisT2IRequest(BaseModel):
+    prompt: str
+    width: int = 1344
+    height: int = 768
+    seed: int = -1
+    # True なら width/height は縦横比の指定とみなし、約1MP(Turbo の蒸留解像度)に合わせる
+    auto_size: bool = False
+
+
+@app.post("/api/iris/t2i")
+def generate_iris_t2i(req: IrisT2IRequest):
+    return _generate_or_409("iris_t2i", req.model_dump())
+
+
+# ============================================================================
+# Momo Song 互換の画像生成(multipart form → 画像バイト)
+# ============================================================================
+@app.post("/generate/")
+def generate_compat(
+    prompt: str = Form(...),
+    prompt_2: str = Form(""),
+    width: int = Form(896),
+    height: int = Form(512),
+    seed: int = Form(-1),
+    pipeline: str = Form("t2i"),
+    negative_prompt: str = Form(""),
+    negative_prompt_2: str = Form(""),
+    num_inference_steps: int = Form(4),
+    guidance_scale: float = Form(1.0),
+    freeu: str = Form("false"),
+    auto_seed: str = Form("false"),
+):
+    """Momo Song v5 の remote 画像プロトコル(IMAGE_BACKEND=remote)。Iris-3B で生成し、
+    PNG 本体を返す。width/height は表示枠の縦横比として扱い、約1MPで生成する。
+    Turbo は4ステップ・CFG焼き込みのため num_inference_steps / guidance_scale /
+    negative_prompt* / freeu は受け取るだけで使わない。GPU使用中は他APIと同じく409。
+    """
+    from fastapi.responses import Response
+
+    if pipeline != "t2i":
+        raise HTTPException(status_code=400, detail="pipeline は t2i のみ対応です")
+    text = " ".join(part.strip() for part in (prompt, prompt_2) if part and part.strip())
+    meta = _generate_or_409(
+        "iris_t2i",
+        {"prompt": text, "width": width, "height": height, "seed": seed, "auto_size": True},
+    )
+    path = os.path.join(OUTPUTS_DIR, os.path.basename(meta["image_url"]))
+    with open(path, "rb") as f:
+        return Response(content=f.read(), media_type="image/png")
+
+
+# ============================================================================
 # unload / status / progress
 # ============================================================================
 class UnloadRequest(BaseModel):
-    # "t2i" | "edit" | "controlnet" | "joyai" | "all"
+    # "t2i" | "edit" | "controlnet" | "joyai" | "iris" | "all"
     target: str = "all"
 
 
@@ -485,10 +541,12 @@ class UnloadRequest(BaseModel):
 def unload(req: UnloadRequest):
     if req.target == "joyai":
         result = {"joyai": joyai.family.unload()}
+    elif req.target == "iris":
+        result = {"iris3b": iris3b.family.unload()}
     elif req.target not in ("t2i", "edit", "controlnet", "all"):
         raise HTTPException(
             status_code=400,
-            detail="target は t2i / edit / controlnet / joyai / all のいずれかです",
+            detail="target は t2i / edit / controlnet / joyai / iris / all のいずれかです",
         )
     elif req.target == "all":
         result = registry.unload(None)
