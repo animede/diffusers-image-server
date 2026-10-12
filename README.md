@@ -32,7 +32,7 @@ UI: http://localhost:8620/ (タブ: 画像生成/編集(Edit統合)・Inpaint・
 | `POST /api/inpaint` | ControlNet Inpainting(image + mask_image、白=再生成領域) |
 | `POST /api/outpaint` | 画角拡張(Inpaint 流用。実行前に全モデル解放するため毎回 ~50s のロードコスト) |
 | `POST /api/remove_bg` | 背景除去(rembg / anime、CPU) |
-| `POST /api/charsheet/generate` ほか `/api/charsheet/*` | キャラシート8方向(ジョブ式。refine/undo/remove_bg/split/sheet/zip) |
+| `POST /api/charsheet/generate` ほか `/api/charsheet/*` | キャラシート多方向(ジョブ式。`views` CSV省略時8方向、`size`省略時1024、256〜2048pxで指定可。refine/undo/remove_bg/split/sheet/zip) |
 | `POST /api/prompt/enhance` `/api/prompt/translate` | LLMプロンプト支援(`DS_LLM_URL`) |
 | `GET /api/status` `GET /api/progress` `POST /api/unload` | 運用系(unload target: t2i/edit/controlnet/joyai/iris/all) |
 
@@ -44,7 +44,8 @@ fp8-lightning への切替は空きVRAM < 44GB なら 400 を返す(GGUF を案�
 元サーバの edit_angles 系3方式は持たず、**Edit グループ + fal 2511 Multiple-Angles
 LoRA の transformer-level アダプタ**で8方向を生成する(通常 Edit とモデル共有、
 切替はアダプタトグルのみで再ロード無し)。プロンプトは構造化タグ
-`<sks> [azimuth] eye-level shot medium shot` 8種。
+`<sks> [azimuth] eye-level shot medium shot` 8種。`size<=768`の小画像生成時は、
+全身の切り取りを防ぐためLoRA既定語彙の`wide shot`へ自動的に切り替える。
 
 ## VRAM 目安(実測)
 

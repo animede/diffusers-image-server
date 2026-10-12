@@ -12,8 +12,9 @@ fp8-lightning-angles 変種)を復活させた。
 Multiple-Angles-LoRA(2511ネイティブ)へ差し替えたのに伴い、トリガー文言も
 「自然文の視点描写」から fal LoRA が学習した**構造化タグ**
 `<sks> [azimuth] [elevation] [distance]` へ書き換えた(事前A/Bで90度回転の成功率が
-33%->100%に改善)。distance は "medium shot"(参照ポーズ、全身が写る標準構図)に
-統一。elevation は "eye-level shot"(カメラが被写体と同じ高さ)で全方向共通。
+33%->100%に改善)。distance は通常 "medium shot"、小画像生成時はジョブ層で
+"wide shot"へ差し替える。elevation は "eye-level shot"(カメラが被写体と同じ高さ)で
+全方向共通。
 DS_ANGLES_LORA=2509 の場合は旧LoRA用の自然文プロンプト(旧 charsheet/prompts.py と
 同一文言)を使う(プロンプトとLoRAはペアで切り替わらないと壊れるため、
 families.qwen_image.paths.DS_ANGLES_LORA の値を見て分岐する)。
@@ -47,7 +48,8 @@ _KEEP_ITEMS_SUFFIX = (
 # azimuth語彙(front view / front-right quarter view / right side view /
 # back-right quarter view / back view / back-left quarter view / left side view /
 # front-left quarter view)をそのまま使う。elevation は "eye-level shot" 固定、
-# distance は "medium shot" 固定(全身が写る標準構図、README のreference pose)。 ---
+# distance は通常 "medium shot"(README のreference pose)。小画像生成時は
+# jobs._view_prompt_for_size() が "wide shot"へ差し替える。 ---
 VIEWS_LORA_2511 = [
     {
         "key": "front",

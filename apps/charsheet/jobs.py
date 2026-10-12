@@ -23,6 +23,7 @@ import threading
 import traceback
 import uuid
 from datetime import datetime
+from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -56,7 +57,23 @@ def _job_dir(job_id: str) -> str:
     return d
 
 
-def _init_job(job_id: str, seed: int):
+def _normalize_view_keys(raw: Optional[str]) -> list[str]:
+    if not raw:
+        return [v["key"] for v in VIEWS]
+    keys = list(dict.fromkeys(key.strip() for key in raw.split(",") if key.strip()))
+    invalid = [key for key in keys if key not in VIEW_BY_KEY]
+    if invalid or not keys:
+        raise ValueError(f"views に不正な値があります: {invalid}")
+    return keys
+
+
+def _init_job(
+    job_id: str,
+    seed: int,
+    generation_size: Optional[int] = None,
+    view_keys: Optional[list[str]] = None,
+):
+    selected = [VIEW_BY_KEY[key] for key in (view_keys or _normalize_view_keys(None))]
     views = [
         {
             "key": v["key"],
@@ -66,15 +83,17 @@ def _init_job(job_id: str, seed: int):
             "url": None,
             "has_prev": False,
         }
-        for v in VIEWS
+        for v in selected
     ]
     with jobs_lock:
         jobs[job_id] = {
             "job_id": job_id,
             "status": "queued",
             "progress": 0,
-            "total": len(VIEWS),
+            "total": len(selected),
             "seed": seed,
+            "generation_size": generation_size,
+            "requested_views": [v["key"] for v in selected],
             "views": views,
             "sheet_url": None,
             "zip_url": None,
@@ -99,7 +118,7 @@ def _refresh_has_prev(job_id: str):
 
 def _restore_job_from_disk(job_id: str):
     """メモリに無いジョブを outputs/charsheet/{job_id}/ から再構築する。
-    8方向すべての画像が揃っている場合のみ復元(それ以外は None)。
+    完了シートと1方向以上の画像が揃っている場合に復元する。
     サーバー再起動後でも既存ジョブに対して refine / undo / 参照 ができるようにする。
     """
     # パストラバーサル防止
@@ -108,9 +127,13 @@ def _restore_job_from_disk(job_id: str):
     job_dir = os.path.join(OUTPUTS_DIR, job_id)
     if not os.path.isdir(job_dir):
         return None
-    for v in VIEWS:
-        if not os.path.exists(os.path.join(job_dir, f"{v['key']}.png")):
-            return None
+    sheet_exists = os.path.exists(os.path.join(job_dir, "sheet.png"))
+    available = [
+        v for v in VIEWS
+        if os.path.exists(os.path.join(job_dir, f"{v['key']}.png"))
+    ]
+    if not sheet_exists or not available:
+        return None
 
     views = [
         {
@@ -121,16 +144,16 @@ def _restore_job_from_disk(job_id: str):
             "url": f"/api/charsheet/jobs/{job_id}/images/{v['key']}.png",
             "has_prev": _has_prev(job_id, v["key"]),
         }
-        for v in VIEWS
+        for v in available
     ]
-    sheet_exists = os.path.exists(os.path.join(job_dir, "sheet.png"))
     zip_exists = os.path.exists(os.path.join(job_dir, "download.zip"))
     job = {
         "job_id": job_id,
         "status": "done",
-        "progress": len(VIEWS),
-        "total": len(VIEWS),
+        "progress": len(available),
+        "total": len(available),
         "seed": 0,
+        "requested_views": [v["key"] for v in available],
         "views": views,
         "sheet_url": f"/api/charsheet/jobs/{job_id}/sheet.png" if sheet_exists else None,
         "zip_url": f"/api/charsheet/jobs/{job_id}/download.zip" if zip_exists else None,
@@ -198,7 +221,26 @@ def _copy_generated_image(meta: dict, dest_path: str) -> None:
     shutil.copy2(src_path, dest_path)
 
 
-def _run_job(job_id: str, input_path: str, seed: int):
+def _view_prompt_for_size(prompt: str, generation_size: Optional[int]) -> str:
+    """小解像度ではLoRA既定語彙のwide shotを使い、全身を画面内へ収める。"""
+    if not generation_size or generation_size > 768:
+        return prompt
+    if "medium shot" in prompt:
+        prompt = prompt.replace("medium shot", "wide shot")
+    base = prompt.rstrip(". ")
+    return (
+        base + ". Use a wide full-body composition with the complete figure visible "
+        "from the top of the head to both feet and clear margin on every side."
+    )
+
+
+def _run_job(
+    job_id: str,
+    input_path: str,
+    seed: int,
+    generation_size: Optional[int] = None,
+    view_keys: Optional[list[str]] = None,
+):
     global current_job_id
     job_dir = _job_dir(job_id)
     got_lock = False
@@ -216,16 +258,21 @@ def _run_job(job_id: str, input_path: str, seed: int):
         generate_mod.ensure_edit_loaded()
 
         image_paths = {}
-        total_views = len(VIEWS)
-        for idx, view in enumerate(VIEWS):
+        selected_views = [
+            VIEW_BY_KEY[key] for key in (view_keys or _normalize_view_keys(None))
+        ]
+        total_views = len(selected_views)
+        for idx, view in enumerate(selected_views):
             key = view["key"]
             _update_view(job_id, key, status="running")
             try:
                 meta = generate_mod.generate_view(
                     processed,
-                    prompt=view["prompt"],
+                    prompt=_view_prompt_for_size(view["prompt"], generation_size),
                     seed=seed,
                     negative_prompt=NEGATIVE_PROMPT,
+                    width=generation_size,
+                    height=generation_size,
                     progress_extra={
                         "job_id": job_id,
                         "direction": key,
@@ -344,10 +391,19 @@ async def get_split_file(split_id: str, filename: str):
 async def generate(
     image: UploadFile = File(None),
     seed: int = Form(0),
+    size: Optional[int] = Form(None),
+    views: Optional[str] = Form(None),
     split_id: str = Form(None),
     figure_index: int = Form(None),
 ):
     global current_job_id
+
+    if size is not None and (size < 256 or size > 2048):
+        raise HTTPException(status_code=400, detail="size は 256〜2048px の範囲で指定してください")
+    try:
+        view_keys = _normalize_view_keys(views)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # 入力の決定: multipart image か、split の保存済み crop のどちらか
     crop_path = None
@@ -396,9 +452,13 @@ async def generate(
             current_job_id = None
         raise HTTPException(status_code=400, detail=f"画像の読み込みに失敗しました: {exc}")
 
-    _init_job(job_id, seed)
+    _init_job(job_id, seed, generation_size=size, view_keys=view_keys)
 
-    thread = threading.Thread(target=_run_job, args=(job_id, input_path, seed), daemon=True)
+    thread = threading.Thread(
+        target=_run_job,
+        args=(job_id, input_path, seed, size, view_keys),
+        daemon=True,
+    )
     thread.start()
 
     return {"job_id": job_id}
