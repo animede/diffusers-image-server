@@ -26,6 +26,7 @@ from pydantic import BaseModel
 import families.qwen_image as qwen_image  # noqa: F401  (import 副作用で registry に登録)
 import families.joyai as joyai  # noqa: F401  (import 副作用で registry に登録)
 import families.iris3b as iris3b  # noqa: F401  (import 副作用で registry に登録)
+import families.klein as klein  # noqa: F401  (import 副作用で registry に登録)
 from apps.charsheet import router as charsheet_router
 from core import bg as bg_mod
 from core import gpu
@@ -58,8 +59,9 @@ _MODE_TO_FAMILY = {
     "inpaint": "qwen_image",
     "joyai_edit": "joyai",
     "iris_t2i": "iris3b",
+    "klein": "klein",
 }
-_JOYAI_MODE_ALIAS = {"joyai_edit": "edit", "iris_t2i": "t2i"}
+_JOYAI_MODE_ALIAS = {"joyai_edit": "edit", "iris_t2i": "t2i", "klein": "generate"}
 
 
 def _record_last_generation(meta: dict) -> None:
@@ -493,6 +495,84 @@ def generate_iris_t2i(req: IrisT2IRequest):
 
 
 # ============================================================================
+# FLUX.2 klein 4B / 9B(T2I・I2I・最大8枚の参照画像、4 steps)
+# ============================================================================
+_KLEIN_MAX_UPLOAD = 10 * 1024 * 1024
+
+
+def _decode_klein_reference(data: bytes, max_side: int) -> Image.Image:
+    """移植元(flux2-klein-studio)と同じ前処理: 透過は白で合成し、最大辺 max_side に縮小。"""
+    img = Image.open(io.BytesIO(data))
+    if img.width * img.height > 16_000_000:
+        raise ValueError("参照画像は1600万画素以内にしてください")
+    img = ImageOps.exif_transpose(img)
+    if img.mode in {"RGBA", "LA"} or "transparency" in img.info:
+        rgba = img.convert("RGBA")
+        canvas = Image.new("RGBA", rgba.size, "white")
+        canvas.alpha_composite(rgba)
+        img = canvas.convert("RGB")
+    else:
+        img = img.convert("RGB")
+    img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+    return img.copy()
+
+
+@app.post("/api/klein/generate")
+async def generate_klein(
+    prompt: str = Form(...),
+    model: str = Form(klein.DEFAULT_MODEL),
+    images: List[UploadFile] = File(default=[]),
+    width: int = Form(1024),
+    height: int = Form(1024),
+    seed: int = Form(-1),
+):
+    """FLUX.2 klein。参照画像 0 枚で T2I、1〜8 枚で I2I / Ref2I(4 steps・guidance 1.0 固定)。
+    model は "4b"(既定、Apache-2.0)/ "9b"(非商用)。幅・高さは 256〜2048 の32の倍数。
+    参照画像は枚数とモデルに応じて自動縮小する(移植元と同じ規則)。
+    """
+    prompt = prompt.strip()
+    if not prompt or len(prompt) > 4000:
+        raise HTTPException(status_code=400, detail="prompt は1〜4000文字で指定してください")
+    try:
+        model_key = klein.normalize_model(model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # サイズ検証はモデルのロードより前に行う(ファミリー側の検証だけだと、不正なサイズでも
+    # 先に 4B ⇔ 9B の載せ替え(~20s)が走ってからエラーになる)。
+    for side in (width, height):
+        if side < klein.MIN_SIDE or side > klein.MAX_SIDE or side % 32:
+            raise HTTPException(
+                status_code=400,
+                detail=f"幅・高さは {klein.MIN_SIDE}〜{klein.MAX_SIDE} の32の倍数で指定してください",
+            )
+    uploads = [u for u in images if u.filename]
+    if len(uploads) > klein.MAX_REFERENCES:
+        raise HTTPException(status_code=400, detail=f"参照画像は{klein.MAX_REFERENCES}枚までです")
+    max_side = klein.reference_max_side(len(uploads), model_key)
+    references = []
+    for upload in uploads:
+        data = await upload.read(_KLEIN_MAX_UPLOAD + 1)
+        if len(data) > _KLEIN_MAX_UPLOAD:
+            raise HTTPException(status_code=413, detail="参照画像は1枚につき10MB以内にしてください")
+        try:
+            references.append(_decode_klein_reference(data, max_side))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"参照画像を読み込めません: {exc}")
+    return _generate_or_409(
+        "klein",
+        {
+            "prompt": prompt,
+            "width": width,
+            "height": height,
+            "seed": seed,
+            "_images": references,
+            "_reference_max_side": max_side,
+        },
+        load_kwargs={"model": model_key},
+    )
+
+
+# ============================================================================
 # Momo Song 互換の画像生成(multipart form → 画像バイト)
 # ============================================================================
 @app.post("/generate/")
@@ -533,7 +613,7 @@ def generate_compat(
 # unload / status / progress
 # ============================================================================
 class UnloadRequest(BaseModel):
-    # "t2i" | "edit" | "controlnet" | "joyai" | "iris" | "all"
+    # "t2i" | "edit" | "controlnet" | "joyai" | "iris" | "klein" | "all"
     target: str = "all"
 
 
@@ -543,10 +623,12 @@ def unload(req: UnloadRequest):
         result = {"joyai": joyai.family.unload()}
     elif req.target == "iris":
         result = {"iris3b": iris3b.family.unload()}
+    elif req.target == "klein":
+        result = {"klein": klein.family.unload()}
     elif req.target not in ("t2i", "edit", "controlnet", "all"):
         raise HTTPException(
             status_code=400,
-            detail="target は t2i / edit / controlnet / joyai / iris / all のいずれかです",
+            detail="target は t2i / edit / controlnet / joyai / iris / klein / all のいずれかです",
         )
     elif req.target == "all":
         result = registry.unload(None)

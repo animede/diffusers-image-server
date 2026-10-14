@@ -45,10 +45,12 @@
               <option value="qwen-2512">Qwen-Image-2512(T2I/I2I)</option>
               <option value="qwen-2512-gguf">Qwen-Image-2512(T2I/I2I・GGUF Q4_K_M・軽量)</option>
               <option value="iris-3b-turbo">Iris-3B Turbo(T2Iのみ・4steps・約8GB)</option>
+              <option value="klein-4b">FLUX.2 klein 4B(T2I/参照最大8枚・4steps・約7.5GB)</option>
+              <option value="klein-9b">FLUX.2 klein 9B(高品質・非商用・約13GB)</option>
             </select>
           </label>
           <p class="form-hint">モデル切替時は別モデルの解放 → 再ロードが走るため、数十秒かかることがあります。GGUF版は量子化が軽量なぶん画質はやや劣りますが24GB/20GB級カードでも動作します。</p>
-          <label>参照画像(任意・最大3枚。複数選択可)
+          <label>参照画像(任意・最大3枚、FLUX.2 klein は最大8枚。複数選択可)
             <input type="file" name="images" accept="image/*" multiple>
           </label>
           <p class="form-hint qwen-edit-only-fields">
@@ -114,6 +116,17 @@
               <input type="number" name="qwen2512_strength" value="0.6" step="0.05" min="0.05" max="1">
             </label>
           </div>
+          <div class="form-grid klein-only-fields hidden">
+            <label>seed(-1でランダム) <input type="number" name="klein_seed" value="-1" step="1"></label>
+            <label>幅 <input type="number" name="klein_width" value="1024" step="32" min="256" max="2048"></label>
+            <label>高さ <input type="number" name="klein_height" value="1024" step="32" min="256" max="2048"></label>
+          </div>
+          <p class="form-hint klein-only-fields hidden">
+            FLUX.2 klein(4 steps・guidance 1.0 固定)。参照画像なしで T2I、1〜8 枚で I2I / 複数参照の合成
+            (参照画像は枚数に応じて自動縮小)。ネガティブプロンプト・steps・cfg は使いません。
+            <strong class="klein-9b-license hidden">9B は FLUX Non-Commercial License(非商用)です。</strong>
+            4B と 9B は同時に載らないため、切替時は解放 → 再ロード(約20秒)が走ります。
+          </p>
           <div class="form-grid iris-only-fields hidden">
             <label>seed(-1でランダム) <input type="number" name="iris_seed" value="-1" step="1"></label>
             <label>幅 <input type="number" name="iris_width" value="1344" step="16" min="256" max="2048"></label>
@@ -346,6 +359,6 @@
   <img id="lightbox-image" class="lightbox-image" alt="拡大表示">
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=20261014klein"></script>
 </body>
 </html>

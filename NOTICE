@@ -6,4 +6,19 @@ License, Version 2.0. Third-party libraries, external services, models, and
 model weights are not relicensed by this project and remain subject to their
 respective licenses and terms.
 
-No model weights are included in this repository.
+No model weights are included in this repository. Models are downloaded at
+runtime from their original distributors and remain under their own licenses
+(see the "ライセンス" section of README.md for the per-model list).
+
+FLUX.2 klein 9B, which this server can optionally load, is distributed by
+Black Forest Labs Inc. under the FLUX Non-Commercial License v2.1. When the
+model or a derivative is distributed, the license requires the following
+Attribution Notice:
+
+  This FLUX Model is licensed by Black Forest Labs Inc. under the FLUX
+  Non-Commercial License. Copyright Black Forest Labs Inc. IN NO EVENT SHALL
+  BLACK FOREST LABS INC. BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+  WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+  IN CONNECTION WITH USE OF THIS MODEL.
+
+FLUX.2 klein 4B (the default klein model) is licensed under Apache-2.0.

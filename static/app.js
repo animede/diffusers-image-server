@@ -30,6 +30,8 @@ async function refreshStatus() {
     parts.push(`joyai:${joyai.loaded ? "済" : "-"}`);
     const iris = d.iris3b || {};
     parts.push(`iris:${iris.loaded ? "済" : "-"}`);
+    const klein = d.klein || {};
+    parts.push(`klein:${klein.loaded ? klein.model : "-"}`);
     $("#status-text").textContent = parts.join(" | ");
   } catch (e) {
     $("#status-text").textContent = "ステータス取得失敗";
@@ -102,6 +104,7 @@ function editModelKind() {
   const v = $("#edit-model-select").value;
   if (v.startsWith("joyai")) return "joyai";
   if (v.startsWith("iris")) return "iris";
+  if (v.startsWith("klein")) return "klein";
   if (v.startsWith("qwen-2512")) return "qwen2512";
   return "qwenedit";
 }
@@ -112,8 +115,10 @@ function updateEditFields() {
   $$(".joyai-only-fields").forEach((el) => el.classList.toggle("hidden", kind !== "joyai"));
   $$(".qwen-2512-only-fields").forEach((el) => el.classList.toggle("hidden", kind !== "qwen2512"));
   $$(".iris-only-fields").forEach((el) => el.classList.toggle("hidden", kind !== "iris"));
-  // Iris Turbo は CFG を焼き込み済みでネガティブプロンプトを使わない
-  $("#edit-form").negative_prompt.closest("label").classList.toggle("hidden", kind === "iris");
+  $$(".klein-only-fields").forEach((el) => el.classList.toggle("hidden", kind !== "klein"));
+  $$(".klein-9b-license").forEach((el) => el.classList.toggle("hidden", $("#edit-model-select").value !== "klein-9b"));
+  // Iris Turbo / FLUX.2 klein は CFG なし(guidance 1.0)でネガティブプロンプトを使わない
+  $("#edit-form").negative_prompt.closest("label").classList.toggle("hidden", kind === "iris" || kind === "klein");
 }
 $("#edit-model-select").addEventListener("change", updateEditFields);
 updateEditFields();
@@ -159,6 +164,16 @@ $("#edit-form").addEventListener("submit", async (ev) => {
       if (form.joyai_height.value) fd.append("height", form.joyai_height.value);
       if (gguf) fd.append("quant", "gguf-q4_k_m");
       resp = await fetch("/api/joyai/edit", { method: "POST", body: fd });
+    } else if (kind === "klein") {
+      if (files.length > 8) throw new Error("FLUX.2 klein の参照画像は8枚までです");
+      const fd = new FormData();
+      fd.append("prompt", prompt);
+      fd.append("model", $("#edit-model-select").value === "klein-9b" ? "9b" : "4b");
+      fd.append("width", form.klein_width.value || "1024");
+      fd.append("height", form.klein_height.value || "1024");
+      fd.append("seed", form.klein_seed.value || "-1");
+      files.forEach((f) => fd.append("images", f));
+      resp = await fetch("/api/klein/generate", { method: "POST", body: fd });
     } else if (kind === "iris") {
       if (files.length) throw new Error("Iris-3B Turbo はテキストのみ生成です(参照画像を外してください)");
       resp = await fetch("/api/iris/t2i", {
